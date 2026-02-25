@@ -4,6 +4,7 @@ use std::env;
 
 const TOOLS: &[&str] = &["claude", "cursor", "opencode"];
 const COMMANDS: &[&str] = &[
+    "daemon",
     "log",
     "status",
     "commit",
@@ -28,6 +29,9 @@ pub fn is_command(arg: &str) -> bool {
 
 pub fn run_command(command: &str, args: &[String]) -> Result<(), String> {
     match command {
+        "daemon" => {
+            return run_daemon_command(args);
+        }
         "log" => {
             println!("gg log: not implemented");
         }
@@ -58,6 +62,15 @@ pub fn run_command(command: &str, args: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn run_daemon_command(args: &[String]) -> Result<(), String> {
+    let subcommand = args.get(0).map(String::as_str).unwrap_or("");
+    match subcommand {
+        "stop" => daemon::stop_daemon(),
+        "restart" => daemon::restart_daemon(),
+        _ => Err("usage: gg daemon <stop|restart>".to_string()),
+    }
 }
 
 fn run_session_command(args: &[String]) -> Result<(), String> {
@@ -208,6 +221,7 @@ Examples:\n\
   gg claude\n\
   gg log\n\
   gg status\n\
+  gg daemon restart\n\
   gg session event --session ses_123 --summary \"Add tests\" --path src/lib.rs\n\
   gg session event --session ses_123 --summary \"Fix bug\" --tokens-in 1200 --tokens-out 250 --tool-token bash:30:10:system --git-stdout\n\
 "

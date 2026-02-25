@@ -30,6 +30,7 @@ struct Response {
     ok: bool,
     message: String,
     summary: Option<String>,
+    #[serde(default)]
     staged_paths: Vec<String>,
     commit_hash: Option<String>,
     git_stdout: Option<String>,
@@ -141,6 +142,34 @@ pub fn send_event(
     }
 }
 
+pub fn stop_daemon() -> Result<(), String> {
+    let socket = socket_path();
+    let mut stream =
+        UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;
+
+    let request = Request {
+        kind: "shutdown".to_string(),
+        session_id: None,
+        summary: None,
+        paths: None,
+        tokens: None,
+        tool_tokens: None,
+        cwd: None,
+        git_stdout: None,
+    };
+
+    let payload = serde_json::to_vec(&request).map_err(|err| err.to_string())?;
+    stream.write_all(&payload).map_err(|err| err.to_string())?;
+    stream.shutdown(std::net::Shutdown::Write).map_err(|err| err.to_string())?;
+
+    Ok(())
+}
+
+pub fn restart_daemon() -> Result<(), String> {
+    let _ = stop_daemon();
+    ensure_daemon_running()
+}
+
 fn handle_stream(mut stream: UnixStream) -> Result<(), String> {
     let mut buffer = String::new();
     stream.read_to_string(&mut buffer).map_err(|err| err.to_string())?;
@@ -149,9 +178,11 @@ fn handle_stream(mut stream: UnixStream) -> Result<(), String> {
     }
     let request: Request = serde_json::from_str(&buffer).map_err(|err| err.to_string())?;
 
-    let response = match request.kind.as_str() {
+    let kind = request.kind.clone();
+    let response = match kind.as_str() {
         "event" => handle_event(&request),
         "ping" => Ok(EventResult::pong()),
+        "shutdown" => Ok(EventResult::shutdown()),
         _ => Err("unsupported request".to_string()),
     };
 
@@ -170,6 +201,14 @@ fn handle_stream(mut stream: UnixStream) -> Result<(), String> {
 
     let response_json = serde_json::to_vec(&response).map_err(|err| err.to_string())?;
     stream.write_all(&response_json).map_err(|err| err.to_string())?;
+
+    if kind == "shutdown" {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::process::exit(0);
+        });
+    }
+
     Ok(())
 }
 
@@ -203,6 +242,17 @@ impl EventResult {
             commit_hash: self.commit_hash,
             git_stdout: self.git_stdout,
             git_stderr: self.git_stderr,
+        }
+    }
+
+    fn shutdown() -> Self {
+        Self {
+            message: "shutdown".to_string(),
+            summary: None,
+            staged_paths: Vec::new(),
+            commit_hash: None,
+            git_stdout: None,
+            git_stderr: None,
         }
     }
 }

@@ -11,7 +11,7 @@ Minimal Rust skeleton for an AI-native Git/JJ porcelain wrapper.
 ## Example
 ```
 gg session event --session ses_123 --summary "Add tests" --path src/lib.rs
-gg session event --session ses_123 --summary "Fix bug" --tokens-in 1200 --tokens-out 250 --tool-token bash:30:10:system
+gg session event --session ses_123 --summary "Fix bug" --tokens-in 1200 --tokens-out 250 --tool-token bash:30:10:system --git-stdout
 ```
 
 ## Joke

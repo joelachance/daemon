@@ -5,9 +5,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use ignore::gitignore::GitignoreBuilder;
 
-pub fn stage_paths(paths: &[String]) -> Result<(), String> {
+#[derive(Debug, Default, Clone)]
+pub struct GitOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub fn stage_paths(paths: &[String]) -> Result<GitOutput, String> {
     if paths.is_empty() {
-        return Ok(());
+        return Ok(GitOutput::default());
     }
 
     let root = repo_root()?;
@@ -17,7 +23,7 @@ pub fn stage_paths(paths: &[String]) -> Result<(), String> {
         cmd.arg(path);
     }
 
-    run_status(cmd)
+    run_status_output(cmd)
 }
 
 
@@ -134,10 +140,13 @@ pub fn filter_paths_to_cwd(
     Ok(filtered)
 }
 
-pub fn commit(summary: &str, trailers: &[(&str, &str)]) -> Result<Option<String>, String> {
+pub fn commit(
+    summary: &str,
+    trailers: &[(&str, &str)],
+) -> Result<(Option<String>, GitOutput), String> {
     let root = repo_root()?;
     if staged_is_clean(&root)? {
-        return Ok(None);
+        return Ok((None, GitOutput::default()));
     }
 
     let trailer_block = trailers
@@ -157,11 +166,11 @@ pub fn commit(summary: &str, trailers: &[(&str, &str)]) -> Result<Option<String>
         cmd.arg("-m").arg(trailer_block);
     }
 
-    run_status(cmd)?;
+    let output = run_status_output(cmd)?;
     let mut rev_cmd = Command::new("git");
     rev_cmd.arg("-C").arg(&root).arg("rev-parse").arg("HEAD");
     let sha = run_stdout(rev_cmd)?;
-    Ok(Some(sha.trim().to_string()))
+    Ok((Some(sha.trim().to_string()), output))
 }
 
 pub fn append_session_event(session_id: &str, payload: &str) -> Result<String, String> {
@@ -309,6 +318,22 @@ fn run_status(mut cmd: Command) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("command failed: {:?}", cmd))
+    }
+}
+
+fn run_status_output(mut cmd: Command) -> Result<GitOutput, String> {
+    let output = cmd.output().map_err(|err| err.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        Ok(GitOutput { stdout, stderr })
+    } else {
+        let mut message = format!("command failed: {:?}", cmd);
+        if !stderr.trim().is_empty() {
+            message.push_str(&format!("\n{stderr}"));
+        }
+        Err(message)
     }
 }
 

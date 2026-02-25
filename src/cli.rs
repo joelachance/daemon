@@ -1,5 +1,6 @@
 use crate::daemon;
 use crate::session::{TokenUsage, ToolTokenUsage};
+use std::env;
 
 const TOOLS: &[&str] = &["claude", "cursor", "opencode"];
 const COMMANDS: &[&str] = &[
@@ -63,7 +64,7 @@ fn run_session_command(args: &[String]) -> Result<(), String> {
     let subcommand = args.get(0).map(String::as_str).unwrap_or("");
     if subcommand != "event" {
         return Err(
-            "usage: gg session event --session <id> --summary <text> [--path <file>]... [--tokens-in <n> --tokens-out <n> --tokens-total <n>] [--tool-token <tool>:<input>:<output>[:<type>]]...".to_string(),
+            "usage: gg session event --session <id> --summary <text> [--path <file>]... [--tokens-in <n> --tokens-out <n> --tokens-total <n>] [--tool-token <tool>:<input>:<output>[:<type>]]... [--git-stdout]".to_string(),
         );
     }
 
@@ -74,6 +75,7 @@ fn run_session_command(args: &[String]) -> Result<(), String> {
     let mut tokens_out: Option<u64> = None;
     let mut tokens_total: Option<u64> = None;
     let mut tool_tokens: Vec<ToolTokenUsage> = Vec::new();
+    let mut git_stdout = env_flag("GG_GIT_STDOUT");
 
     let mut i = 1;
     while i < args.len() {
@@ -110,6 +112,9 @@ fn run_session_command(args: &[String]) -> Result<(), String> {
                     tool_tokens.push(parse_tool_token(value)?);
                 }
             }
+            "--git-stdout" => {
+                git_stdout = true;
+            }
             _ => {}
         }
         i += 1;
@@ -120,7 +125,7 @@ fn run_session_command(args: &[String]) -> Result<(), String> {
 
     let tokens = build_tokens(tokens_in, tokens_out, tokens_total)?;
 
-    daemon::send_event(&session_id, &summary, &paths, tokens, tool_tokens)
+    daemon::send_event(&session_id, &summary, &paths, tokens, tool_tokens, git_stdout)
 }
 
 fn parse_u64(value: Option<&String>) -> Result<Option<u64>, String> {
@@ -178,6 +183,13 @@ fn parse_tool_token(raw: &str) -> Result<ToolTokenUsage, String> {
     })
 }
 
+fn env_flag(key: &str) -> bool {
+    matches!(
+        env::var(key).ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
 pub fn print_help() {
     println!(
         "gg: AI-native Git/JJ porcelain\n\
@@ -197,7 +209,7 @@ Examples:\n\
   gg log\n\
   gg status\n\
   gg session event --session ses_123 --summary \"Add tests\" --path src/lib.rs\n\
-  gg session event --session ses_123 --summary \"Fix bug\" --tokens-in 1200 --tokens-out 250 --tool-token bash:30:10:system\n\
+  gg session event --session ses_123 --summary \"Fix bug\" --tokens-in 1200 --tokens-out 250 --tool-token bash:30:10:system --git-stdout\n\
 "
     );
 }

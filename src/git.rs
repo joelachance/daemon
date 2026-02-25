@@ -142,7 +142,7 @@ pub fn filter_paths_to_cwd(
 
 pub fn commit(
     summary: &str,
-    trailers: &[(&str, &str)],
+    trailers: &[(String, String)],
 ) -> Result<(Option<String>, GitOutput), String> {
     let root = repo_root()?;
     if staged_is_clean(&root)? {
@@ -310,6 +310,95 @@ fn run_stdout_with_input(mut cmd: Command, input: &str) -> Result<String, String
         return Err(format!("command failed: {:?}", cmd));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn set_local_config(key: &str, value: &str) -> Result<bool, String> {
+    let current = get_local_config(key)?;
+    if current.as_deref() == Some(value) {
+        return Ok(false);
+    }
+
+    let root = repo_root()?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(&root)
+        .arg("config")
+        .arg("--local")
+        .arg(key)
+        .arg(value);
+    run_status(cmd)?;
+    Ok(true)
+}
+
+pub fn add_local_config_if_missing(key: &str, value: &str) -> Result<bool, String> {
+    let values = get_local_config_values(key)?;
+    if values.iter().any(|item| item == value) {
+        return Ok(false);
+    }
+
+    let root = repo_root()?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(&root)
+        .arg("config")
+        .arg("--local")
+        .arg("--add")
+        .arg(key)
+        .arg(value);
+    run_status(cmd)?;
+    Ok(true)
+}
+
+pub fn get_local_config(key: &str) -> Result<Option<String>, String> {
+    let values = get_local_config_values(key)?;
+    Ok(values.into_iter().next())
+}
+
+pub fn list_remotes() -> Result<Vec<String>, String> {
+    let root = repo_root()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .arg("remote")
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err("git remote failed".to_string());
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+fn get_local_config_values(key: &str) -> Result<Vec<String>, String> {
+    let root = repo_root()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .arg("config")
+        .arg("--local")
+        .arg("--get-all")
+        .arg(key)
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    match output.status.code() {
+        Some(0) => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            Ok(text
+                .lines()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect())
+        }
+        Some(1) => Ok(Vec::new()),
+        _ => Err("git config failed".to_string()),
+    }
 }
 
 fn run_status(mut cmd: Command) -> Result<(), String> {

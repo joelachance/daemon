@@ -1,6 +1,7 @@
 use crate::git::{self, GitOutput};
 use crate::session::{TokenUsage, ToolTokenUsage};
-use console::style;
+use console::{style, Color};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -102,8 +103,11 @@ pub fn send_event(
     tokens: Option<TokenUsage>,
     tool_tokens: Vec<ToolTokenUsage>,
     git_stdout: bool,
+    compact: bool,
 ) -> Result<(), String> {
     ensure_daemon_running()?;
+
+    let mut spinner = SpinnerGuard::new(start_spinner("checkpointing"));
 
     let cwd = env::current_dir()
         .map_err(|err| err.to_string())?
@@ -133,9 +137,10 @@ pub fn send_event(
     stream.read_to_string(&mut response_buf).map_err(|err| err.to_string())?;
     let response: Response =
         serde_json::from_str(&response_buf).map_err(|err| err.to_string())?;
+    spinner.finish();
 
     if response.ok {
-        print_response(&response);
+        print_response(&response, compact);
         Ok(())
     } else {
         Err(response.message)
@@ -168,6 +173,71 @@ pub fn stop_daemon() -> Result<(), String> {
 pub fn restart_daemon() -> Result<(), String> {
     let _ = stop_daemon();
     ensure_daemon_running()
+}
+
+pub fn init_repo(coauthor: Option<String>, disable_coauthor: bool) -> Result<(), String> {
+    let mut changes: Vec<String> = Vec::new();
+
+    if git::set_local_config("notes.displayRef", "refs/notes/gg")? {
+        changes.push("notes.displayRef -> refs/notes/gg".to_string());
+    }
+
+    let remotes = git::list_remotes()?;
+    for remote in remotes {
+        let fetch_notes = format!("+refs/notes/*:refs/notes/*");
+        if git::add_local_config_if_missing(
+            &format!("remote.{remote}.fetch"),
+            &fetch_notes,
+        )? {
+            changes.push(format!("remote.{remote}.fetch += {fetch_notes}"));
+        }
+
+        let push_notes = "refs/notes/*:refs/notes/*";
+        if git::add_local_config_if_missing(
+            &format!("remote.{remote}.push"),
+            push_notes,
+        )? {
+            changes.push(format!("remote.{remote}.push += {push_notes}"));
+        }
+
+        let fetch_sessions = format!("+refs/gg/*:refs/gg/*");
+        if git::add_local_config_if_missing(
+            &format!("remote.{remote}.fetch"),
+            &fetch_sessions,
+        )? {
+            changes.push(format!("remote.{remote}.fetch += {fetch_sessions}"));
+        }
+
+        let push_sessions = "refs/gg/*:refs/gg/*";
+        if git::add_local_config_if_missing(
+            &format!("remote.{remote}.push"),
+            push_sessions,
+        )? {
+            changes.push(format!("remote.{remote}.push += {push_sessions}"));
+        }
+    }
+
+    if disable_coauthor {
+        if git::set_local_config("gg.coauthor", "off")? {
+            changes.push("gg.coauthor -> off".to_string());
+        }
+    } else {
+        let value = coauthor.unwrap_or_else(|| "gg <gg@local>".to_string());
+        if git::set_local_config("gg.coauthor", &value)? {
+            changes.push(format!("gg.coauthor -> {value}"));
+        }
+    }
+
+    if changes.is_empty() {
+        println!("gg: {}", style("init: no changes").dim());
+    } else {
+        println!("gg: {}", style("init complete").bold());
+        for change in changes {
+            println!("  - {change}");
+        }
+    }
+
+    Ok(())
 }
 
 fn handle_stream(mut stream: UnixStream) -> Result<(), String> {
@@ -291,11 +361,10 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
         stage_output = git::stage_paths(&stage_paths)?;
     }
 
-    let trailers = [
-        ("AI-Session", session_id.as_str()),
-        ("AI-Tool", "gg"),
-        ("AI-Schema", "1"),
-    ];
+    let mut trailers: Vec<(String, String)> = Vec::new();
+    if let Some(coauthor) = coauthor_trailer() {
+        trailers.push(("Co-authored-by".to_string(), coauthor));
+    }
 
     let (commit_hash, commit_output) = git::commit(summary, &trailers)?;
 
@@ -400,7 +469,70 @@ fn socket_path() -> String {
     env::var("GG_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string())
 }
 
-fn print_response(response: &Response) {
+fn coauthor_trailer() -> Option<String> {
+    let raw = env::var("GG_COAUTHOR").ok();
+    match raw.as_deref() {
+        Some("") | Some("0") | Some("false") | Some("off") | Some("no") => None,
+        Some(value) => Some(value.to_string()),
+        None => {
+            if let Ok(Some(value)) = git::get_local_config("gg.coauthor") {
+                if matches!(value.as_str(), "" | "0" | "false" | "off" | "no") {
+                    None
+                } else {
+                    Some(value)
+                }
+            } else {
+                Some("gg <gg@local>".to_string())
+            }
+        }
+    }
+}
+
+fn start_spinner(message: &str) -> Option<ProgressBar> {
+    if !env_flag("GG_SPINNER", true) {
+        return None;
+    }
+
+    let spinner = ProgressBar::new_spinner();
+    let style = ProgressStyle::with_template("{spinner} {msg}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner());
+    spinner.set_style(style);
+    spinner.set_message(message.to_string());
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    Some(spinner)
+}
+
+struct SpinnerGuard {
+    spinner: Option<ProgressBar>,
+}
+
+impl SpinnerGuard {
+    fn new(spinner: Option<ProgressBar>) -> Self {
+        Self { spinner }
+    }
+
+    fn finish(&mut self) {
+        if let Some(spinner) = self.spinner.take() {
+            spinner.finish_and_clear();
+        }
+    }
+}
+
+impl Drop for SpinnerGuard {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn env_flag(key: &str, default: bool) -> bool {
+    match env::var(key).ok().as_deref() {
+        Some("1") | Some("true") | Some("yes") | Some("on") => true,
+        Some("0") | Some("false") | Some("no") | Some("off") => false,
+        _ => default,
+    }
+}
+
+fn print_response(response: &Response, compact: bool) {
     if let Some(stdout) = &response.git_stdout {
         if !stdout.trim().is_empty() {
             print!("{stdout}");
@@ -413,16 +545,35 @@ fn print_response(response: &Response) {
         }
     }
 
+    let theme = Theme::from_env();
     let staged_count = response.staged_paths.len();
     if staged_count == 0 {
-        println!("gg: {}", style("no changes").dim());
+        let msg = apply_color("no changes", theme.dim).dim();
+        println!("gg: {msg}");
+        return;
+    }
+
+    if compact {
+        let summary = response.summary.as_deref().unwrap_or("checkpoint");
+        let hash = response
+            .commit_hash
+            .as_ref()
+            .map(|value| value.chars().take(7).collect::<String>())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "gg: {} {} {}",
+            apply_color("staged", theme.staged).bold(),
+            apply_color(format!("{staged_count}"), theme.count),
+            apply_color(hash, theme.hash)
+        );
+        println!("    {}", summary);
         return;
     }
 
     println!(
         "gg: {} {}",
-        style("staged").bold(),
-        style(format!("{staged_count} file(s)")).cyan()
+        apply_color("staged", theme.staged).bold(),
+        apply_color(format!("{staged_count} file(s)"), theme.count)
     );
 
     let max_list = 8;
@@ -436,6 +587,69 @@ fn print_response(response: &Response) {
     if let Some(hash) = &response.commit_hash {
         let short = hash.chars().take(7).collect::<String>();
         let summary = response.summary.as_deref().unwrap_or("checkpoint");
-        println!("gg: {} {} - {}", style("committed").bold(), short, summary);
+        println!(
+            "gg: {} {} - {}",
+            apply_color("committed", theme.committed).bold(),
+            apply_color(short, theme.hash),
+            summary
+        );
+    }
+}
+
+struct Theme {
+    staged: Option<Color>,
+    count: Option<Color>,
+    committed: Option<Color>,
+    hash: Option<Color>,
+    dim: Option<Color>,
+}
+
+impl Theme {
+    fn from_env() -> Self {
+        Self {
+            staged: color_from_env("GG_COLOR_STAGED", Some(Color::Green)),
+            count: color_from_env("GG_COLOR_COUNT", Some(Color::Cyan)),
+            committed: color_from_env("GG_COLOR_COMMITTED", Some(Color::Green)),
+            hash: color_from_env("GG_COLOR_HASH", Some(Color::Yellow)),
+            dim: color_from_env("GG_COLOR_DIM", None),
+        }
+    }
+}
+
+fn apply_color<T: std::fmt::Display>(value: T, color: Option<Color>) -> console::StyledObject<T> {
+    let styled = style(value);
+    match color {
+        Some(color) => styled.fg(color),
+        None => styled,
+    }
+}
+
+fn color_from_env(key: &str, default: Option<Color>) -> Option<Color> {
+    let value = match env::var(key) {
+        Ok(value) => value.to_ascii_lowercase(),
+        Err(_) => return default,
+    };
+    if value == "none" || value == "off" || value == "false" {
+        return None;
+    }
+
+    match value.as_str() {
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "white" => Some(Color::White),
+        "brightblack" | "gray" | "grey" => Some(Color::BrightBlack),
+        "brightred" => Some(Color::BrightRed),
+        "brightgreen" => Some(Color::BrightGreen),
+        "brightyellow" => Some(Color::BrightYellow),
+        "brightblue" => Some(Color::BrightBlue),
+        "brightmagenta" => Some(Color::BrightMagenta),
+        "brightcyan" => Some(Color::BrightCyan),
+        "brightwhite" => Some(Color::BrightWhite),
+        _ => default,
     }
 }

@@ -1,10 +1,12 @@
 use crate::daemon;
 use crate::session::{TokenUsage, ToolTokenUsage};
 use std::env;
+use std::io::{self, IsTerminal};
 
 const TOOLS: &[&str] = &["claude", "cursor", "opencode"];
 const COMMANDS: &[&str] = &[
     "daemon",
+    "init",
     "log",
     "status",
     "commit",
@@ -31,6 +33,9 @@ pub fn run_command(command: &str, args: &[String]) -> Result<(), String> {
     match command {
         "daemon" => {
             return run_daemon_command(args);
+        }
+        "init" => {
+            return run_init_command(args);
         }
         "log" => {
             println!("gg log: not implemented");
@@ -73,11 +78,51 @@ fn run_daemon_command(args: &[String]) -> Result<(), String> {
     }
 }
 
+fn run_init_command(args: &[String]) -> Result<(), String> {
+    let mut coauthor: Option<String> = None;
+    let mut disable_coauthor = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--coauthor" => {
+                i += 1;
+                if let Some(value) = args.get(i) {
+                    coauthor = Some(value.clone());
+                }
+            }
+            "--no-coauthor" => {
+                disable_coauthor = true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if !disable_coauthor && coauthor.is_none() && io::stdin().is_terminal() {
+        println!(
+            "gg init: co-author for gg commits? (default: gg <gg@local>, enter 'none' to disable)"
+        );
+        if let Some(input) = read_line()?.map(|value| value.trim().to_string()) {
+            if !input.is_empty() {
+                let lowered = input.to_ascii_lowercase();
+                if matches!(lowered.as_str(), "none" | "off" | "no") {
+                    disable_coauthor = true;
+                } else {
+                    coauthor = Some(input);
+                }
+            }
+        }
+    }
+
+    daemon::init_repo(coauthor, disable_coauthor)
+}
+
 fn run_session_command(args: &[String]) -> Result<(), String> {
     let subcommand = args.get(0).map(String::as_str).unwrap_or("");
     if subcommand != "event" {
         return Err(
-            "usage: gg session event --session <id> --summary <text> [--path <file>]... [--tokens-in <n> --tokens-out <n> --tokens-total <n>] [--tool-token <tool>:<input>:<output>[:<type>]]... [--git-stdout]".to_string(),
+            "usage: gg session event --session <id> --summary <text> [--path <file>]... [--tokens-in <n> --tokens-out <n> --tokens-total <n>] [--tool-token <tool>:<input>:<output>[:<type>]]... [--git-stdout] [--compact]".to_string(),
         );
     }
 
@@ -89,6 +134,7 @@ fn run_session_command(args: &[String]) -> Result<(), String> {
     let mut tokens_total: Option<u64> = None;
     let mut tool_tokens: Vec<ToolTokenUsage> = Vec::new();
     let mut git_stdout = env_flag("GG_GIT_STDOUT");
+    let mut compact = env_flag("GG_COMPACT");
 
     let mut i = 1;
     while i < args.len() {
@@ -128,6 +174,9 @@ fn run_session_command(args: &[String]) -> Result<(), String> {
             "--git-stdout" => {
                 git_stdout = true;
             }
+            "--compact" => {
+                compact = true;
+            }
             _ => {}
         }
         i += 1;
@@ -138,7 +187,15 @@ fn run_session_command(args: &[String]) -> Result<(), String> {
 
     let tokens = build_tokens(tokens_in, tokens_out, tokens_total)?;
 
-    daemon::send_event(&session_id, &summary, &paths, tokens, tool_tokens, git_stdout)
+    daemon::send_event(
+        &session_id,
+        &summary,
+        &paths,
+        tokens,
+        tool_tokens,
+        git_stdout,
+        compact,
+    )
 }
 
 fn parse_u64(value: Option<&String>) -> Result<Option<u64>, String> {
@@ -203,6 +260,17 @@ fn env_flag(key: &str) -> bool {
     )
 }
 
+fn read_line() -> Result<Option<String>, String> {
+    let mut input = String::new();
+    let bytes = io::stdin()
+        .read_line(&mut input)
+        .map_err(|err| err.to_string())?;
+    if bytes == 0 {
+        return Ok(None);
+    }
+    Ok(Some(input))
+}
+
 pub fn print_help() {
     println!(
         "gg: AI-native Git/JJ porcelain\n\
@@ -215,12 +283,13 @@ Tools (launches daemon + tool):\n\
   claude | cursor | opencode\n\
 \n\
 Commands:\n\
-  log | status | commit | show | blame | open | session\n\
+  init | log | status | commit | show | blame | open | session | daemon\n\
 \n\
 Examples:\n\
   gg claude\n\
   gg log\n\
   gg status\n\
+  gg init\n\
   gg daemon restart\n\
   gg session event --session ses_123 --summary \"Add tests\" --path src/lib.rs\n\
   gg session event --session ses_123 --summary \"Fix bug\" --tokens-in 1200 --tokens-out 250 --tool-token bash:30:10:system --git-stdout\n\

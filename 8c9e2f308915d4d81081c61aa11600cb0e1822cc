@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "session_id": "ses_123",
+  "summary": "Test checkpoint",
+  "commit": "8c9e2f308915d4d81081c61aa11600cb0e1822cc",
+  "paths": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "src/cli.rs",
+    "src/daemon.rs",
+    "src/git.rs"
+  ],
+  "timestamp": "2026-02-25T19:32:27.547619Z",
+  "tokens": null,
+  "tool_tokens": []
+}

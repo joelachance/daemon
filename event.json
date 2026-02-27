@@ -1,35 +1,35 @@
 {
   "schema": 1,
   "session_id": "ses_362d0fc3cffekXXjn3ZDl7T2vv",
-  "summary": "What do you mean by'session events are stored as commits'? What's the benefit of using refs over notes? What are you mea...",
+  "summary": "Okay that makes sense. When you do a git push, are refs included with the data?",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:00.650165Z",
+  "timestamp": "2026-02-27T05:19:00.736666Z",
   "tokens": {
-    "input": 13263,
-    "output": 318,
-    "total": 27021
+    "input": 787,
+    "output": 170,
+    "total": 27197
   },
   "tool_tokens": [],
   "meta": {
     "agent": "plan",
     "finish": "stop",
-    "message_id": "msg_c9d34fafa00272edORpo0LFWGg",
+    "message_id": "msg_c9d3e06d9002O48Tx9V6DJlwIs",
     "mode": "plan",
     "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d3503b2001m7hYS5HAZbgNL9",
-    "part_time_created": 1772164023218,
+    "part_id": "prt_c9d3e1689001DcMl031MdvMmbD",
+    "part_time_created": 1772164617865,
     "path": {
       "cwd": "/Users/joe/git/daemon",
       "root": "/Users/joe/git/daemon"
     },
     "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
     "prompt": {
-      "text": "What do you mean by'session events are stored as commits'? What's the benefit of using refs over notes? What are you meaning by in-memory registry? "
+      "text": "Okay that makes sense. When you do a git push, are refs included with the data? "
     },
     "provider_id": "openai",
     "response": {
-      "text": "Here’s what I meant, mapped to the code you saw:\n\n“Session events are stored as commits”\n- In `src/git.rs`, `append_session_event_in_root` writes the JSON payload to a blob, builds a tiny tree with `event.json`, and then creates a new commit via `git commit-tree`.\n- That commit is then pointed to by `refs/gg/sessions/<session_id>` using `git update-ref`.\n- So the event history is literally a commit chain under that ref, not a normal branch.\n\nBenefit of refs over notes (in this design)\n- Refs give you a standalone, ordered event log per session. You can `rev-list refs/gg/sessions/<id>` to replay events in order without scanning the main commit history.\n- Notes attach to existing commits; they’re great for annotating real commits but don’t form a clean, session‑scoped log by themselves.\n- The current code actually uses both: refs for the session event log, notes to attach the event payload to the associated work commit.\n\n“In-memory registry”\n- A daemon‑local `HashMap` that tracks active sessions while the daemon process is running.\n- It is not persisted to git; it’s just runtime state used to manage “active vs ended” and last‑seen metadata so the daemon knows when a session is considered open.\n- It resets when the daemon restarts; persistence continues to be the git ref/notes storage."
+      "text": "Yes, but only if configured. By default `git push` does not include arbitrary refs like `refs/gg/*`. This repo’s `init_repo` adds remote config so `refs/gg/*` (and `refs/notes/*`) are fetched/pushed. In `src/daemon.rs` it sets:\n\n- `remote.<name>.fetch += +refs/gg/*:refs/gg/*`\n- `remote.<name>.push  +=  refs/gg/*:refs/gg/*`\n- (and the same for `refs/notes/*`)\n\nSo with that config in place, `git push` will include those refs. Without it, they won’t be transferred."
     },
     "role": "assistant",
     "session_directory": "/Users/joe/git/daemon",

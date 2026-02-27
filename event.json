@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "session_id": "ses_362d0b085ffeEKX7UddpUcznpG",
+  "summary": "Cursor ingestion (full prompt/response)",
+  "commit": null,
+  "paths": [],
+  "timestamp": "2026-02-27T05:19:00.483904Z",
+  "tokens": {
+    "input": 4113,
+    "output": 923,
+    "total": 19116
+  },
+  "tool_tokens": [],
+  "meta": {
+    "agent": "plan",
+    "finish": "stop",
+    "message_id": "msg_c9d2f597f0026d9Bqza7Gj4Bz0",
+    "mode": "plan",
+    "model_id": "gpt-5.2-codex",
+    "part_id": "prt_c9d2f6311001muEjZl3Fz257SP",
+    "part_time_created": 1772163654417,
+    "path": {
+      "cwd": "/Users/joe/git/daemon",
+      "root": "/Users/joe/git/daemon"
+    },
+    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
+    "prompt": {
+      "text": "Cursor ingestion (full prompt/response)\nYou are working in READ-ONLY mode. Do NOT edit, create, or delete files. You may only read files and report findings.\nGoal: Implement Step 4 — Cursor ingestion for full prompt/response.\nRequirements:\n- Parse Cursor bubble records (bubbleId:<composer_id>:<bubble_id>) to extract prompt/response text and tool calls.\n- Emit events per assistant response (not just session completion).\n- Map to repo + session model.\nWhat to do:\n1) Inspect src/cursor.rs and schemas/cursor.md.\n2) Identify current query patterns and where to add bubble reads.\n3) Propose the extraction fields and event emission points.\n4) Draft a concrete change plan:\n   - SQL queries needed\n   - extraction logic\n   - how to map to unified event model\nDeliverable:\n- A short report listing:\n  - files to change\n  - queries/fields to use\n  - event emission flow\n  - any schema updates needed\nConstraints:\n- No file edits\n- No running git commands\n- Only read/inspect code\nRepository root: /Users/joe/git/daemon "
+    },
+    "provider_id": "openai",
+    "response": {
+      "text": "Cursor ingestion plan based on `src/cursor.rs` and `schemas/cursor.md`.\n\n**Files to change**\n- `src/cursor.rs`\n- `schemas/cursor.md`\n- (If unified event model lives elsewhere) the module that defines event payloads and mapping; not visible in the two inspected files, so likely `src/daemon.rs` or `src/session.rs` depending on where `send_event` is structured.\n\n**Queries/fields to use**\n- Existing session query (keep): `select key, cast(value as text) from cursorDiskKV where key like 'composerData:%'`.\n- New bubble query (per bubble): `select cast(value as text) from cursorDiskKV where key = 'bubbleId:<composer_id>:<bubble_id>'`.\n- Optional bulk bubble query for a composer: `select key, cast(value as text) from cursorDiskKV where key like 'bubbleId:<composer_id>:%'`.\n- Fields in `composerData:<composer_id>` to continue using:\n  - `status`, `lastUpdatedAt`, `createdAt`, `name`, `subtitle`, `modelConfig.modelName`, `contextTokensUsed`, `contextTokenLimit`, `isArchived`\n  - `fullConversationHeadersOnly` as the ordered list of bubble references (IDs or objects).\n- Fields to extract from `bubbleId:<composer_id>:<bubble_id>` (need to confirm exact names, but schema hints):\n  - `role` (user/assistant)\n  - `text` or equivalent message content\n  - tool calls/results arrays (exact key TBD)\n  - diffs/file edits arrays (if present)\n\n**Event emission flow**\n- Current logic only emits once per completed session. Change to emit per assistant bubble:\n  1) For each `composerData` matching repo, parse `fullConversationHeadersOnly` to get ordered `bubble_id`s.\n  2) Track last emitted bubble per `composer_id` in state (new state field).\n  3) For each new bubble:\n     - Read `bubbleId:<composer_id>:<bubble_id>` JSON.\n     - If role is assistant, emit event immediately with:\n       - session_id = composer_id\n       - summary = assistant response text (or a trimmed preview)\n       - meta: include bubble_id, role, model, timestamps, tool calls/results, attachments, etc.\n       - repo mapping via `root` (same as current).\n  4) Update state with last emitted bubble per session (not just `lastUpdatedAt`).\n- Optional: If the response spans multiple assistant bubbles, emit for each bubble to meet “per assistant response” requirement.\n\n**Schema updates needed**\n- `schemas/cursor.md`:\n  - Add the bubble extraction field names once confirmed.\n  - Document the new per-bubble emission strategy and state tracking.\n  - Add example for `bubbleId` JSON structure once identified.\n\n**Concrete change plan**\n1) **SQL queries**\n   - Keep existing `composerData` scan for repo filtering (by value containing repo path/URI).\n   - Add `bubbleId` fetch per `bubble_id` from `fullConversationHeadersOnly`.\n2) **Extraction logic**\n   - Parse `fullConversationHeadersOnly` entries into `bubble_id`s (handle strings vs objects).\n   - Load each `bubbleId` JSON, pull `role`, `text`, `toolCalls`, `toolResults`, `diffs` (exact keys to verify).\n   - Create new state: `last_emitted_bubble: HashMap<String, String or i64>` (per composer_id).\n3) **Unified event mapping**\n   - For assistant bubbles:\n     - `summary`: assistant text snippet.\n     - `meta`: include `composer_id`, `bubble_id`, `role`, model info, timestamps from composerData, tool calls/results.\n     - `session_id`: composer_id, `repo`: root path.\n   - Tokens: use `contextTokensUsed` as a coarse `total` until per-bubble tokens are found.\n\nIf you want me to confirm bubble JSON field names, I’ll need permission to inspect `bubbleId:*` records or add a read-only query helper (still no edits unless you ask)."
+    },
+    "role": "assistant",
+    "session_directory": "/Users/joe/git/daemon",
+    "session_id": "ses_362d0b085ffeEKX7UddpUcznpG",
+    "session_title": "Cursor ingestion plan for full prompt/response extraction",
+    "source": "opencode"
+  }
+}

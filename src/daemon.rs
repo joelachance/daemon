@@ -271,7 +271,7 @@ fn start_auto_push_thread(registry: Arc<Mutex<SessionRegistry>>) {
 
     std::thread::spawn(move || loop {
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        let mut roots = Vec::new();
+        let mut branches = Vec::new();
 
         {
             let mut guard = match registry.lock() {
@@ -301,16 +301,19 @@ fn start_auto_push_thread(registry: Arc<Mutex<SessionRegistry>>) {
                     continue;
                 }
                 session.auto_push_last_attempt = now;
-                roots.push(session.root.clone());
+                branches.push((
+                    session.root.clone(),
+                    session_branch_name(&session.session_id),
+                ));
             }
         }
 
-        roots.sort();
-        roots.dedup();
+        branches.sort();
+        branches.dedup();
 
-        for root in roots {
-            match auto_push_repo(&root) {
-                Ok(AutoPushOutcome::Pushed) | Ok(AutoPushOutcome::Noop) => {
+        for (root, branch) in branches {
+            match auto_push_branch(&root, &branch) {
+                Ok(AutoPushOutcome::Pushed) => {
                     mark_auto_push_attempted(&registry, &root, now, timeout_secs)
                 }
                 Ok(AutoPushOutcome::Skipped) => {}
@@ -324,22 +327,20 @@ fn start_auto_push_thread(registry: Arc<Mutex<SessionRegistry>>) {
 
 enum AutoPushOutcome {
     Pushed,
-    Noop,
     Skipped,
 }
 
-fn auto_push_repo(root: &str) -> Result<AutoPushOutcome, String> {
-    let ahead = match git::upstream_ahead_count_in_root(root)? {
-        Some(value) => value,
-        None => return Ok(AutoPushOutcome::Skipped),
-    };
-    if ahead == 0 {
-        return Ok(AutoPushOutcome::Noop);
+fn auto_push_branch(root: &str, branch: &str) -> Result<AutoPushOutcome, String> {
+    if !git::has_remote_in_root(root)? {
+        return Ok(AutoPushOutcome::Skipped);
+    }
+    if !git::branch_exists_in_root(root, branch)? {
+        return Ok(AutoPushOutcome::Skipped);
     }
     if !git::working_tree_clean_in_root(root)? {
         return Ok(AutoPushOutcome::Skipped);
     }
-    git::push_in_root(root)?;
+    git::push_branch_in_root(root, branch)?;
     Ok(AutoPushOutcome::Pushed)
 }
 
@@ -391,20 +392,20 @@ fn check_auto_push_on_startup() {
     };
 
     let now = OffsetDateTime::now_utc().unix_timestamp();
-    if !should_auto_push_on_startup(&sessions, now, timeout_secs) {
-        return;
-    }
-
-    if let Err(err) = auto_push_repo(&root) {
-        eprintln!("daemon: auto push error: {err}");
+    let branches = branches_for_startup_autopush(&sessions, now, timeout_secs);
+    for branch in branches {
+        if let Err(err) = auto_push_branch(&root, &branch) {
+            eprintln!("daemon: auto push error: {err}");
+        }
     }
 }
 
-fn should_auto_push_on_startup(
+fn branches_for_startup_autopush(
     sessions: &[store::SessionInfo],
     now: i64,
     timeout_secs: i64,
-) -> bool {
+) -> Vec<String> {
+    let mut branches = Vec::new();
     for session in sessions {
         if session.end_status.is_none() {
             continue;
@@ -417,11 +418,14 @@ fn should_auto_push_on_startup(
             Some(value) => value,
             None => continue,
         };
-        if now - ts >= timeout_secs {
-            return true;
+        if now - ts < timeout_secs {
+            continue;
         }
+        branches.push(session_branch_name(&session.id));
     }
-    false
+    branches.sort();
+    branches.dedup();
+    branches
 }
 
 fn parse_event_timestamp(value: &str) -> Option<i64> {
@@ -626,6 +630,7 @@ fn handle_event(
             .to_string(),
     };
     let root = git::repo_root_from(&cwd).or_else(|_| git::repo_root())?;
+    ensure_session_branch(&root, session_id)?;
     let commit_message = build_commit_message(request.summary.as_deref(), request.meta.as_ref());
     let tool_tokens = request.tool_tokens.clone().unwrap_or_default();
     let git_stdout = request.git_stdout.unwrap_or(false);
@@ -982,6 +987,29 @@ fn extract_end_flags(meta: Option<&serde_json::Value>) -> (bool, bool) {
         .and_then(|val| val.as_bool())
         .unwrap_or(false);
     (explicit_end, soft_end)
+}
+
+fn ensure_session_branch(root: &str, session_id: &str) -> Result<(), String> {
+    let branch = session_branch_name(session_id);
+    if git::branch_exists_in_root(root, &branch)? {
+        git::checkout_branch_in_root(root, &branch)?;
+    } else {
+        git::create_branch_in_root(root, &branch)?;
+    }
+    Ok(())
+}
+
+fn session_branch_name(session_id: &str) -> String {
+    let mut out = String::with_capacity(session_id.len() + 11);
+    out.push_str("gg/session-");
+    for ch in session_id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    out
 }
 
 fn extract_prompt_text(meta: &serde_json::Value) -> Option<String> {

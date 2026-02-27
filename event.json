@@ -1,35 +1,35 @@
 {
   "schema": 1,
   "session_id": "ses_362d0b085ffeEKX7UddpUcznpG",
-  "summary": "tell me where to find a schema file",
+  "summary": "I don't think we have one yet. Let's just work with what we currently have and we'll go from there. We can change the sc...",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:01.12866Z",
+  "timestamp": "2026-02-27T05:19:01.447734Z",
   "tokens": {
-    "input": 22905,
-    "output": 164,
-    "total": 42141
+    "input": 779,
+    "output": 900,
+    "total": 72975
   },
   "tool_tokens": [],
   "meta": {
-    "agent": "plan",
+    "agent": "build",
     "finish": "stop",
-    "message_id": "msg_c9d474691002HJZx5w1MhnoYSz",
-    "mode": "plan",
+    "message_id": "msg_c9d4cabf9002QNvrXInhh1baLO",
+    "mode": "build",
     "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d47533a001E7gXul0Phacu6t",
-    "part_time_created": 1772165223226,
+    "part_id": "prt_c9d4cd22e001DdUGhjA67YedOy",
+    "part_time_created": 1772165583406,
     "path": {
       "cwd": "/Users/joe/git/daemon",
       "root": "/Users/joe/git/daemon"
     },
     "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
     "prompt": {
-      "text": "tell me where to find a schema file"
+      "text": "I don't think we have one yet. Let's just work with what we currently have and we'll go from there. We can change the schema as we go "
     },
     "provider_id": "openai",
     "response": {
-      "text": "I haven’t scanned the repo beyond `schemas/cursor.md`, so I can’t point to a specific unified event schema file yet. Typical places to check (read-only) in this repo:\n\n- `schemas/` (if more markdown schemas live there)\n- `src/session.rs` (often defines event/session payloads)\n- `src/daemon.rs` (where `send_event` is defined/used)\n- `src/events.rs` or `src/event.rs` (if present)\n\nIf you want an exact path, tell me which of those is present or let me read the repo tree and I’ll point to the precise schema file."
+      "text": "Added per-bubble ingestion in `src/cursor.rs` so Cursor sessions now emit events for each assistant response, with prompt context and tool call metadata captured from bubble records, while keeping the existing completion event for backwards compatibility. Updated `schemas/cursor.md` to document the confirmed bubble field names and type mapping.\n\nDetails\n- `src/cursor.rs` now opens the Cursor DB once per poll, extracts ordered `fullConversationHeadersOnly` bubble IDs, and reads each `bubbleId:<composer_id>:<bubble_id>` record.\n- Assistant bubbles (`type=2`) emit events with summary derived from `text`/`thinking.text` or tool call name, plus prompt context from the most recent user bubble (`type=1`) in `meta.prompt`.\n- Tool call data (`toolFormerData`) and token counts (`tokenCount`) are included in event metadata; token usage is populated per bubble when present.\n- State tracking now includes `last_bubble` so previously-emitted bubbles are not reprocessed.\n\nFiles touched\n- `src/cursor.rs`\n- `schemas/cursor.md`\n\nTests not run.\n\nNext steps (pick one)\n1. Run the daemon and verify new per-bubble events are appended in `refs/gg/sessions/<composer_id>`.\n2. If you want to suppress the session-complete event or change its payload, tell me and I’ll adjust."
     },
     "role": "assistant",
     "session_directory": "/Users/joe/git/daemon",

@@ -1,14 +1,20 @@
+use crate::claude;
+use crate::cursor;
 use crate::git::{self, GitOutput};
+use crate::opencode;
 use crate::session::{TokenUsage, ToolTokenUsage};
 use console::{style, Color};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const DEFAULT_SOCKET: &str = "/tmp/ggd.sock";
@@ -22,6 +28,7 @@ struct Request {
     paths: Option<Vec<String>>,
     tokens: Option<TokenUsage>,
     tool_tokens: Option<Vec<ToolTokenUsage>>,
+    meta: Option<serde_json::Value>,
     cwd: Option<String>,
     git_stdout: Option<bool>,
 }
@@ -48,6 +55,23 @@ struct SessionEventPayload {
     timestamp: String,
     tokens: Option<TokenUsage>,
     tool_tokens: Vec<ToolTokenUsage>,
+    meta: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionState {
+    tool: String,
+    session_id: String,
+    root: String,
+    last_activity: i64,
+    explicit_end: bool,
+    soft_end: bool,
+    active: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SessionRegistry {
+    sessions: HashMap<String, SessionState>,
 }
 
 pub fn run_daemon() -> Result<(), String> {
@@ -57,17 +81,23 @@ pub fn run_daemon() -> Result<(), String> {
     }
 
     let listener = UnixListener::bind(&socket).map_err(|err| err.to_string())?;
-    eprintln!("gg daemon: listening on {socket}");
+    eprintln!("daemon: listening on {socket}");
+
+    let registry = Arc::new(Mutex::new(load_registry()));
+    start_stdin_thread(registry.clone());
+    start_cursor_poll_thread();
+    start_claude_poll_thread();
+    start_opencode_poll_thread();
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(err) = handle_stream(stream) {
-                    eprintln!("gg daemon: {err}");
+                if let Err(err) = handle_stream(stream, registry.clone()) {
+                    eprintln!("daemon: {err}");
                 }
             }
             Err(err) => {
-                eprintln!("gg daemon: {err}");
+                eprintln!("daemon: {err}");
             }
         }
     }
@@ -75,25 +105,167 @@ pub fn run_daemon() -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_tool(tool: &str, args: &[String]) -> Result<(), String> {
-    ensure_daemon_running()?;
-    eprintln!("gg: launching tool: {tool}");
-
-    let mut cmd = Command::new(tool);
-    cmd.args(args);
-
-    match cmd.status() {
-        Ok(status) => {
-            if !status.success() {
-                return Err(format!("{tool} exited with status {status}"));
-            }
-            Ok(())
-        }
-        Err(_) => {
-            eprintln!("gg: tool '{tool}' not found on PATH (stub)\n");
-            Ok(())
-        }
+fn start_cursor_poll_thread() {
+    if parse_bool_env("GG_CURSOR_POLL") == Some(false) {
+        return;
     }
+
+    let interval_secs = env::var("GG_CURSOR_POLL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(5);
+
+    std::thread::spawn(move || loop {
+        if cursor::cursor_running() {
+            let root = env::var("GG_CURSOR_REPO")
+                .ok()
+                .or_else(|| git::repo_root().ok());
+
+            if let Some(root) = root {
+                let git_stdout = parse_bool_env("GG_GIT_STDOUT")
+                    .or_else(|| {
+                        git::get_local_config_in_root(&root, "gg.git-stdout")
+                            .ok()
+                            .flatten()
+                            .as_deref()
+                            .and_then(parse_bool)
+                    })
+                    .unwrap_or(false);
+                let compact = parse_bool_env("GG_COMPACT")
+                    .or_else(|| {
+                        git::get_local_config_in_root(&root, "gg.compact")
+                            .ok()
+                            .flatten()
+                            .as_deref()
+                            .and_then(parse_bool)
+                    })
+                    .unwrap_or(false);
+
+                if let Err(err) =
+                    cursor::poll_completed_sessions(Path::new(&root), git_stdout, compact)
+                {
+                    eprintln!("daemon: cursor poll error: {err}");
+                }
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+    });
+}
+
+fn start_claude_poll_thread() {
+    if parse_bool_env("GG_CLAUDE_POLL") == Some(false) {
+        return;
+    }
+
+    let interval_secs = env::var("GG_CLAUDE_POLL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(5);
+
+    std::thread::spawn(move || loop {
+        let root = env::var("GG_CLAUDE_REPO")
+            .ok()
+            .or_else(|| git::repo_root().ok());
+
+        if let Some(root) = root {
+            let git_stdout = parse_bool_env("GG_GIT_STDOUT")
+                .or_else(|| {
+                    git::get_local_config_in_root(&root, "gg.git-stdout")
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        .and_then(parse_bool)
+                })
+                .unwrap_or(false);
+            let compact = parse_bool_env("GG_COMPACT")
+                .or_else(|| {
+                    git::get_local_config_in_root(&root, "gg.compact")
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        .and_then(parse_bool)
+                })
+                .unwrap_or(false);
+
+            if let Err(err) =
+                claude::poll_assistant_responses(Path::new(&root), git_stdout, compact)
+            {
+                eprintln!("daemon: claude poll error: {err}");
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+    });
+}
+
+fn start_opencode_poll_thread() {
+    if parse_bool_env("GG_OPENCODE_POLL") == Some(false) {
+        return;
+    }
+
+    let interval_secs = env::var("GG_OPENCODE_POLL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(5);
+
+    std::thread::spawn(move || loop {
+        let root = env::var("GG_OPENCODE_REPO")
+            .ok()
+            .or_else(|| git::repo_root().ok());
+
+        if let Some(root) = root {
+            let git_stdout = parse_bool_env("GG_GIT_STDOUT")
+                .or_else(|| {
+                    git::get_local_config_in_root(&root, "gg.git-stdout")
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        .and_then(parse_bool)
+                })
+                .unwrap_or(false);
+            let compact = parse_bool_env("GG_COMPACT")
+                .or_else(|| {
+                    git::get_local_config_in_root(&root, "gg.compact")
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        .and_then(parse_bool)
+                })
+                .unwrap_or(false);
+
+            if let Err(err) =
+                opencode::poll_assistant_messages(Path::new(&root), git_stdout, compact)
+            {
+                eprintln!("daemon: opencode poll error: {err}");
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+    });
+}
+
+fn start_stdin_thread(registry: Arc<Mutex<SessionRegistry>>) {
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 1];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if buf[0] == 0x03 {
+                        if let Err(err) = handle_session_end(&registry) {
+                            eprintln!("daemon: {err}");
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("daemon: stdin read error: {err}");
+                    break;
+                }
+            }
+        }
+    });
 }
 
 pub fn send_event(
@@ -104,15 +276,20 @@ pub fn send_event(
     tool_tokens: Vec<ToolTokenUsage>,
     git_stdout: bool,
     compact: bool,
+    meta: Option<serde_json::Value>,
+    cwd_override: Option<String>,
 ) -> Result<(), String> {
     ensure_daemon_running()?;
 
     let mut spinner = SpinnerGuard::new(start_spinner("checkpointing"));
 
-    let cwd = env::current_dir()
-        .map_err(|err| err.to_string())?
-        .to_string_lossy()
-        .to_string();
+    let cwd = match cwd_override {
+        Some(value) => value,
+        None => env::current_dir()
+            .map_err(|err| err.to_string())?
+            .to_string_lossy()
+            .to_string(),
+    };
 
     let request = Request {
         kind: "event".to_string(),
@@ -121,22 +298,25 @@ pub fn send_event(
         paths: Some(paths.to_vec()),
         tokens,
         tool_tokens: Some(tool_tokens),
+        meta,
         cwd: Some(cwd),
         git_stdout: Some(git_stdout),
     };
 
     let socket = socket_path();
-    let mut stream =
-        UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;
+    let mut stream = UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;
 
     let payload = serde_json::to_vec(&request).map_err(|err| err.to_string())?;
     stream.write_all(&payload).map_err(|err| err.to_string())?;
-    stream.shutdown(std::net::Shutdown::Write).map_err(|err| err.to_string())?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|err| err.to_string())?;
 
     let mut response_buf = String::new();
-    stream.read_to_string(&mut response_buf).map_err(|err| err.to_string())?;
-    let response: Response =
-        serde_json::from_str(&response_buf).map_err(|err| err.to_string())?;
+    stream
+        .read_to_string(&mut response_buf)
+        .map_err(|err| err.to_string())?;
+    let response: Response = serde_json::from_str(&response_buf).map_err(|err| err.to_string())?;
     spinner.finish();
 
     if response.ok {
@@ -147,102 +327,14 @@ pub fn send_event(
     }
 }
 
-pub fn stop_daemon() -> Result<(), String> {
-    let socket = socket_path();
-    let mut stream =
-        UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;
-
-    let request = Request {
-        kind: "shutdown".to_string(),
-        session_id: None,
-        summary: None,
-        paths: None,
-        tokens: None,
-        tool_tokens: None,
-        cwd: None,
-        git_stdout: None,
-    };
-
-    let payload = serde_json::to_vec(&request).map_err(|err| err.to_string())?;
-    stream.write_all(&payload).map_err(|err| err.to_string())?;
-    stream.shutdown(std::net::Shutdown::Write).map_err(|err| err.to_string())?;
-
-    Ok(())
-}
-
-pub fn restart_daemon() -> Result<(), String> {
-    let _ = stop_daemon();
-    ensure_daemon_running()
-}
-
-pub fn init_repo(coauthor: Option<String>, disable_coauthor: bool) -> Result<(), String> {
-    let mut changes: Vec<String> = Vec::new();
-
-    if git::set_local_config("notes.displayRef", "refs/notes/gg")? {
-        changes.push("notes.displayRef -> refs/notes/gg".to_string());
-    }
-
-    let remotes = git::list_remotes()?;
-    for remote in remotes {
-        let fetch_notes = format!("+refs/notes/*:refs/notes/*");
-        if git::add_local_config_if_missing(
-            &format!("remote.{remote}.fetch"),
-            &fetch_notes,
-        )? {
-            changes.push(format!("remote.{remote}.fetch += {fetch_notes}"));
-        }
-
-        let push_notes = "refs/notes/*:refs/notes/*";
-        if git::add_local_config_if_missing(
-            &format!("remote.{remote}.push"),
-            push_notes,
-        )? {
-            changes.push(format!("remote.{remote}.push += {push_notes}"));
-        }
-
-        let fetch_sessions = format!("+refs/gg/*:refs/gg/*");
-        if git::add_local_config_if_missing(
-            &format!("remote.{remote}.fetch"),
-            &fetch_sessions,
-        )? {
-            changes.push(format!("remote.{remote}.fetch += {fetch_sessions}"));
-        }
-
-        let push_sessions = "refs/gg/*:refs/gg/*";
-        if git::add_local_config_if_missing(
-            &format!("remote.{remote}.push"),
-            push_sessions,
-        )? {
-            changes.push(format!("remote.{remote}.push += {push_sessions}"));
-        }
-    }
-
-    if disable_coauthor {
-        if git::set_local_config("gg.coauthor", "off")? {
-            changes.push("gg.coauthor -> off".to_string());
-        }
-    } else {
-        let value = coauthor.unwrap_or_else(|| "gg <gg@local>".to_string());
-        if git::set_local_config("gg.coauthor", &value)? {
-            changes.push(format!("gg.coauthor -> {value}"));
-        }
-    }
-
-    if changes.is_empty() {
-        println!("gg: {}", style("init: no changes").dim());
-    } else {
-        println!("gg: {}", style("init complete").bold());
-        for change in changes {
-            println!("  - {change}");
-        }
-    }
-
-    Ok(())
-}
-
-fn handle_stream(mut stream: UnixStream) -> Result<(), String> {
+fn handle_stream(
+    mut stream: UnixStream,
+    registry: Arc<Mutex<SessionRegistry>>,
+) -> Result<(), String> {
     let mut buffer = String::new();
-    stream.read_to_string(&mut buffer).map_err(|err| err.to_string())?;
+    stream
+        .read_to_string(&mut buffer)
+        .map_err(|err| err.to_string())?;
     if buffer.trim().is_empty() {
         return Ok(());
     }
@@ -250,9 +342,8 @@ fn handle_stream(mut stream: UnixStream) -> Result<(), String> {
 
     let kind = request.kind.clone();
     let response = match kind.as_str() {
-        "event" => handle_event(&request),
+        "event" => handle_event(&request, registry),
         "ping" => Ok(EventResult::pong()),
-        "shutdown" => Ok(EventResult::shutdown()),
         _ => Err("unsupported request".to_string()),
     };
 
@@ -270,13 +361,8 @@ fn handle_stream(mut stream: UnixStream) -> Result<(), String> {
     };
 
     let response_json = serde_json::to_vec(&response).map_err(|err| err.to_string())?;
-    stream.write_all(&response_json).map_err(|err| err.to_string())?;
-
-    if kind == "shutdown" {
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            std::process::exit(0);
-        });
+    if let Err(err) = stream.write_all(&response_json) {
+        return Err(err.to_string());
     }
 
     Ok(())
@@ -314,25 +400,14 @@ impl EventResult {
             git_stderr: self.git_stderr,
         }
     }
-
-    fn shutdown() -> Self {
-        Self {
-            message: "shutdown".to_string(),
-            summary: None,
-            staged_paths: Vec::new(),
-            commit_hash: None,
-            git_stdout: None,
-            git_stderr: None,
-        }
-    }
 }
 
-fn handle_event(request: &Request) -> Result<EventResult, String> {
-    let session_id = request
-        .session_id
-        .as_ref()
-        .ok_or("missing session_id")?;
-    let summary = request.summary.as_ref().ok_or("missing summary")?;
+fn handle_event(
+    request: &Request,
+    registry: Arc<Mutex<SessionRegistry>>,
+) -> Result<EventResult, String> {
+    let session_id = request.session_id.as_ref().ok_or("missing session_id")?;
+    let summary = derive_summary(request.summary.as_deref(), request.meta.as_ref());
     let tool_tokens = request.tool_tokens.clone().unwrap_or_default();
     let git_stdout = request.git_stdout.unwrap_or(false);
 
@@ -343,22 +418,31 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
             .to_string_lossy()
             .to_string(),
     };
+    let root = git::repo_root_from(&cwd).or_else(|_| git::repo_root())?;
+    let tool = request
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("source"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let (explicit_end, soft_end) = extract_end_flags(request.meta.as_ref());
+    update_registry(&registry, &tool, session_id, &root, explicit_end, soft_end)?;
 
     let requested_paths = request.paths.clone().unwrap_or_default();
     let mut stage_paths = if requested_paths.is_empty() {
-        let root = git::repo_root()?;
-        let mut paths = git::list_changed_paths()?;
+        let mut paths = git::list_changed_paths_in_root(&root)?;
         paths = git::filter_paths_to_cwd(&root, Path::new(&cwd), &paths)?;
         paths
     } else {
         requested_paths
     };
 
-    stage_paths = git::filter_ignored_paths(&stage_paths)?;
+    stage_paths = git::filter_ignored_paths_in_root(&root, &stage_paths)?;
 
     let mut stage_output = GitOutput::default();
     if !stage_paths.is_empty() {
-        stage_output = git::stage_paths(&stage_paths)?;
+        stage_output = git::stage_paths_in_root(&root, &stage_paths)?;
     }
 
     let mut trailers: Vec<(String, String)> = Vec::new();
@@ -366,7 +450,7 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
         trailers.push(("Co-authored-by".to_string(), coauthor));
     }
 
-    let (commit_hash, commit_output) = git::commit(summary, &trailers)?;
+    let (commit_hash, commit_output) = git::commit_in_root(&root, &summary, &trailers)?;
 
     let timestamp = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -375,19 +459,20 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
     let payload = SessionEventPayload {
         schema: 1,
         session_id: session_id.to_string(),
-        summary: summary.to_string(),
+        summary: summary.clone(),
         commit: commit_hash.clone(),
         paths: stage_paths.clone(),
         timestamp,
         tokens: request.tokens.clone(),
         tool_tokens,
+        meta: request.meta.clone(),
     };
 
     let payload_json = serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?;
-    let _ = git::append_session_event(session_id, &payload_json)?;
+    let _ = git::append_session_event_in_root(&root, session_id, &payload_json)?;
 
     if let Some(ref hash) = commit_hash {
-        let _ = git::write_notes(NOTES_REF, hash, &payload_json)?;
+        let _ = git::write_notes_in_root(&root, NOTES_REF, hash, &payload_json)?;
     }
 
     let mut git_stdout_buf = String::new();
@@ -413,15 +498,68 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
 
     Ok(EventResult {
         message: "event stored".to_string(),
-        summary: Some(summary.to_string()),
+        summary: Some(summary),
         staged_paths: stage_paths,
         commit_hash,
-        git_stdout: if git_stdout { Some(git_stdout_buf) } else { None },
-        git_stderr: if git_stdout { Some(git_stderr_buf) } else { None },
+        git_stdout: if git_stdout {
+            Some(git_stdout_buf)
+        } else {
+            None
+        },
+        git_stderr: if git_stdout {
+            Some(git_stderr_buf)
+        } else {
+            None
+        },
     })
 }
 
-fn ensure_daemon_running() -> Result<(), String> {
+fn handle_session_end(registry: &Arc<Mutex<SessionRegistry>>) -> Result<(), String> {
+    let mut guard = registry
+        .lock()
+        .map_err(|_| "session registry lock poisoned".to_string())?;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+
+    for session in guard.sessions.values_mut() {
+        if !session.active {
+            continue;
+        }
+
+        let timestamp = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|err| err.to_string())?;
+
+        let payload = SessionEventPayload {
+            schema: 1,
+            session_id: session.session_id.clone(),
+            summary: "session end".to_string(),
+            commit: None,
+            paths: Vec::new(),
+            timestamp,
+            tokens: None,
+            tool_tokens: Vec::new(),
+            meta: Some(json!({
+                "source": "stdin",
+                "end": true,
+                "signal": "CTRL+C",
+            })),
+        };
+
+        let payload_json = serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?;
+        let _ =
+            git::append_session_event_in_root(&session.root, &session.session_id, &payload_json)?;
+
+        session.last_activity = now;
+        session.explicit_end = true;
+        session.soft_end = false;
+        session.active = false;
+    }
+
+    save_registry(&guard)?;
+    Ok(())
+}
+
+pub fn ensure_daemon_running() -> Result<(), String> {
     let socket = socket_path();
     if let Ok(mut stream) = UnixStream::connect(&socket) {
         let ping = Request {
@@ -431,6 +569,7 @@ fn ensure_daemon_running() -> Result<(), String> {
             paths: None,
             tokens: None,
             tool_tokens: None,
+            meta: None,
             cwd: None,
             git_stdout: None,
         };
@@ -450,10 +589,7 @@ fn ensure_daemon_running() -> Result<(), String> {
     }
 
     let exe = env::current_exe().map_err(|err| err.to_string())?;
-    Command::new(exe)
-        .arg("--daemon")
-        .spawn()
-        .map_err(|err| err.to_string())?;
+    Command::new(exe).spawn().map_err(|err| err.to_string())?;
 
     for _ in 0..20 {
         if UnixStream::connect(&socket).is_ok() {
@@ -467,6 +603,18 @@ fn ensure_daemon_running() -> Result<(), String> {
 
 fn socket_path() -> String {
     env::var("GG_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string())
+}
+
+fn parse_bool_env(key: &str) -> Option<bool> {
+    env::var(key).ok().and_then(|value| parse_bool(&value))
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn coauthor_trailer() -> Option<String> {
@@ -486,6 +634,163 @@ fn coauthor_trailer() -> Option<String> {
             }
         }
     }
+}
+
+fn derive_summary(summary: Option<&str>, meta: Option<&serde_json::Value>) -> String {
+    let prompt_text = meta.and_then(extract_prompt_text);
+    let response_text = meta.and_then(extract_response_text);
+
+    if let Some(text) = prompt_text.as_deref().and_then(summarize_text) {
+        return text;
+    }
+    if let Some(text) = response_text.as_deref().and_then(summarize_text) {
+        return text;
+    }
+    if let Some(value) = summary {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "assistant response".to_string()
+}
+
+fn update_registry(
+    registry: &Arc<Mutex<SessionRegistry>>,
+    tool: &str,
+    session_id: &str,
+    root: &str,
+    explicit_end: bool,
+    soft_end: bool,
+) -> Result<(), String> {
+    let mut guard = registry
+        .lock()
+        .map_err(|_| "session registry lock poisoned".to_string())?;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let key = format!("{tool}:{session_id}");
+    let entry = guard.sessions.entry(key).or_insert(SessionState {
+        tool: tool.to_string(),
+        session_id: session_id.to_string(),
+        root: root.to_string(),
+        last_activity: now,
+        explicit_end: false,
+        soft_end: false,
+        active: true,
+    });
+
+    entry.root = root.to_string();
+    entry.last_activity = now;
+    if explicit_end {
+        entry.explicit_end = true;
+        entry.soft_end = false;
+        entry.active = false;
+    } else if soft_end {
+        entry.soft_end = true;
+        entry.active = false;
+    } else {
+        entry.explicit_end = false;
+        entry.soft_end = false;
+        entry.active = true;
+    }
+
+    save_registry(&guard)
+}
+
+fn extract_end_flags(meta: Option<&serde_json::Value>) -> (bool, bool) {
+    let value = match meta {
+        Some(value) => value,
+        None => return (false, false),
+    };
+    let explicit_end = value
+        .get("end")
+        .and_then(|val| val.as_bool())
+        .unwrap_or(false);
+    let soft_end = value
+        .get("soft_end")
+        .and_then(|val| val.as_bool())
+        .unwrap_or(false);
+    (explicit_end, soft_end)
+}
+
+fn registry_path() -> Option<std::path::PathBuf> {
+    let home = env::var("HOME").ok()?;
+    let dir = Path::new(&home).join(".gg");
+    let _ = fs::create_dir_all(&dir);
+    Some(dir.join("daemon.json"))
+}
+
+fn load_registry() -> SessionRegistry {
+    let path = match registry_path() {
+        Some(path) => path,
+        None => return SessionRegistry::default(),
+    };
+    let data = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(_) => return SessionRegistry::default(),
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn save_registry(registry: &SessionRegistry) -> Result<(), String> {
+    let path = match registry_path() {
+        Some(path) => path,
+        None => return Ok(()),
+    };
+    let data = serde_json::to_string_pretty(registry).map_err(|err| err.to_string())?;
+    fs::write(path, data).map_err(|err| err.to_string())
+}
+
+fn extract_prompt_text(meta: &serde_json::Value) -> Option<String> {
+    let prompt = meta.get("prompt")?;
+    match prompt {
+        serde_json::Value::String(value) => Some(value.to_string()),
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(value)) = map.get("text") {
+                return Some(value.to_string());
+            }
+            if let Some(serde_json::Value::String(value)) = map.get("rich_text") {
+                return Some(value.to_string());
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn extract_response_text(meta: &serde_json::Value) -> Option<String> {
+    if let Some(response) = meta.get("response") {
+        match response {
+            serde_json::Value::String(value) => return Some(value.to_string()),
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(value)) = map.get("text") {
+                    return Some(value.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(serde_json::Value::String(value)) = meta.get("response_text") {
+        return Some(value.to_string());
+    }
+    None
+}
+
+fn summarize_text(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+    if first_line.is_empty() {
+        return None;
+    }
+    let max_len = 120usize;
+    let mut summary = first_line.to_string();
+    if summary.chars().count() > max_len {
+        summary = summary.chars().take(max_len).collect::<String>();
+        summary.push_str("...");
+    }
+    Some(summary)
 }
 
 fn start_spinner(message: &str) -> Option<ProgressBar> {
@@ -549,7 +854,7 @@ fn print_response(response: &Response, compact: bool) {
     let staged_count = response.staged_paths.len();
     if staged_count == 0 {
         let msg = apply_color("no changes", theme.dim).dim();
-        println!("gg: {msg}");
+        println!("{msg}");
         return;
     }
 
@@ -561,7 +866,7 @@ fn print_response(response: &Response, compact: bool) {
             .map(|value| value.chars().take(7).collect::<String>())
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "gg: {} {} {}",
+            "{} {} {}",
             apply_color("staged", theme.staged).bold(),
             apply_color(format!("{staged_count}"), theme.count),
             apply_color(hash, theme.hash)
@@ -571,7 +876,7 @@ fn print_response(response: &Response, compact: bool) {
     }
 
     println!(
-        "gg: {} {}",
+        "{} {}",
         apply_color("staged", theme.staged).bold(),
         apply_color(format!("{staged_count} file(s)"), theme.count)
     );
@@ -588,7 +893,7 @@ fn print_response(response: &Response, compact: bool) {
         let short = hash.chars().take(7).collect::<String>();
         let summary = response.summary.as_deref().unwrap_or("checkpoint");
         println!(
-            "gg: {} {} - {}",
+            "{} {} - {}",
             apply_color("committed", theme.committed).bold(),
             apply_color(short, theme.hash),
             summary
@@ -642,14 +947,14 @@ fn color_from_env(key: &str, default: Option<Color>) -> Option<Color> {
         "magenta" => Some(Color::Magenta),
         "cyan" => Some(Color::Cyan),
         "white" => Some(Color::White),
-        "brightblack" | "gray" | "grey" => Some(Color::BrightBlack),
-        "brightred" => Some(Color::BrightRed),
-        "brightgreen" => Some(Color::BrightGreen),
-        "brightyellow" => Some(Color::BrightYellow),
-        "brightblue" => Some(Color::BrightBlue),
-        "brightmagenta" => Some(Color::BrightMagenta),
-        "brightcyan" => Some(Color::BrightCyan),
-        "brightwhite" => Some(Color::BrightWhite),
+        "brightblack" | "gray" | "grey" => Some(Color::Color256(8)),
+        "brightred" => Some(Color::Color256(9)),
+        "brightgreen" => Some(Color::Color256(10)),
+        "brightyellow" => Some(Color::Color256(11)),
+        "brightblue" => Some(Color::Color256(12)),
+        "brightmagenta" => Some(Color::Color256(13)),
+        "brightcyan" => Some(Color::Color256(14)),
+        "brightwhite" => Some(Color::Color256(15)),
         _ => default,
     }
 }

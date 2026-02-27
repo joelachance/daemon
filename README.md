@@ -1,39 +1,39 @@
 # gg (daemon prototype)
 
-Minimal Rust skeleton for an AI-native Git/JJ porcelain wrapper.
+AI-native Git wrapper that watches coding sessions and auto-commits.
+
+## Usage
+```
+gg
+gg status
+gg "<prompt>"
+```
 
 ## Behavior
-- `gg <tool>` ensures the daemon is running and attempts to spawn the tool.
-- `gg session event ...` sends an event to the daemon, which stages changes,
-  commits with trailers, appends a session ref, and writes git notes.
-- Staging respects `.gitignore` plus a root `.ggignore` file (if present).
-- AI metadata is stored in git notes and session refs, not commit messages.
+- `gg` starts the daemon in the foreground and listens for sessions.
+- Ctrl+C ends all active sessions and writes an end event per session.
+- Assistant responses trigger auto-commit with metadata in notes/refs.
+- `gg status` opens the review UI.
+- Any other args are treated as a natural language prompt.
 
-## Init
-Run `gg init` once per repo to configure git notes/refs and co-author identity.
-It will prompt for a co-author name unless you pass `--coauthor` or
-`--no-coauthor`.
+## Review UI (`gg status`)
+- Arrows or j/k navigate
+- Space toggles selection
+- `s` squash, `a` amend, `u` undo
+- Enter accepts as-is and pushes (if remote exists and tree is clean)
 
-## Output customization
-Colors and spinner behavior can be configured via environment variables:
-- `GG_SPINNER=off` disables the spinner (default: on)
-- `GG_COLOR_STAGED` (default: green)
-- `GG_COLOR_COUNT` (default: cyan)
-- `GG_COLOR_COMMITTED` (default: green)
-- `GG_COLOR_HASH` (default: yellow)
-- `GG_COLOR_DIM` (default: dim/no color)
-- Use `--compact` for a one-line summary (Pretty Mode is default).
+## Storage
+- Session metadata: `refs/gg/sessions/<id>`
+- Notes: `refs/notes/gg`
+- Ignore rules: `.gitignore` and `.ggignore` are treated the same
 
-Supported color names: black, red, green, yellow, blue, magenta, cyan, white,
-brightblack/gray, brightred, brightgreen, brightyellow, brightblue,
-brightmagenta, brightcyan, brightwhite. Use `none` to disable a color.
+## Prompt mode
+- Uses Amazon Bedrock (Nova Micro) in `us-west-2`
+- Always human-in-the-loop: shows git commands and asks for confirmation
 
-## Example
-```
-gg init
-gg session event --session ses_123 --summary "Add tests" --path src/lib.rs
-gg session event --session ses_123 --summary "Fix bug" --tokens-in 1200 --tokens-out 250 --tool-token bash:30:10:system --git-stdout --compact
-```
-
-## Joke
-Why do Rust developers never get lost? Because they always know their lifetimes.
+## Environment
+- `GG_SOCKET` override daemon socket path
+- `GG_BEDROCK_MODEL` override Bedrock model id
+- `GG_OPENCODE_DB` override OpenCode DB path
+- `GG_OPENCODE_TIMEOUT_SECS` OpenCode inactivity soft end (default 600)
+- `GG_CLAUDE_DIR` override Claude Code data directory

@@ -67,6 +67,8 @@ struct SessionState {
     explicit_end: bool,
     soft_end: bool,
     active: bool,
+    auto_push_attempted: bool,
+    auto_push_last_attempt: i64,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -90,6 +92,7 @@ pub fn run_daemon(start_stdin: bool) -> Result<(), String> {
     start_cursor_poll_thread();
     start_claude_poll_thread();
     start_opencode_poll_thread();
+    start_auto_push_thread(registry.clone());
 
     for stream in listener.incoming() {
         match stream {
@@ -245,6 +248,125 @@ fn start_opencode_poll_thread() {
 
         std::thread::sleep(std::time::Duration::from_secs(interval_secs));
     });
+}
+
+fn start_auto_push_thread(registry: Arc<Mutex<SessionRegistry>>) {
+    if parse_bool_env("GG_AUTO_PUSH") == Some(false) {
+        return;
+    }
+
+    let interval_secs = env::var("GG_AUTO_PUSH_POLL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30);
+    let timeout_secs = env::var("GG_AUTO_PUSH_AFTER_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(3600);
+    let retry_secs = env::var("GG_AUTO_PUSH_RETRY_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(300);
+
+    std::thread::spawn(move || loop {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let mut roots = Vec::new();
+
+        {
+            let mut guard = match registry.lock() {
+                Ok(value) => value,
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+                    continue;
+                }
+            };
+
+            for session in guard.sessions.values_mut() {
+                if session.active {
+                    continue;
+                }
+                if !session.explicit_end && !session.soft_end {
+                    continue;
+                }
+                if now - session.last_activity < timeout_secs {
+                    continue;
+                }
+                if session.auto_push_attempted {
+                    continue;
+                }
+                if session.auto_push_last_attempt > 0
+                    && now - session.auto_push_last_attempt < retry_secs
+                {
+                    continue;
+                }
+                session.auto_push_last_attempt = now;
+                roots.push(session.root.clone());
+            }
+        }
+
+        roots.sort();
+        roots.dedup();
+
+        for root in roots {
+            match auto_push_repo(&root) {
+                Ok(AutoPushOutcome::Pushed) | Ok(AutoPushOutcome::Noop) => {
+                    mark_auto_push_attempted(&registry, &root, now, timeout_secs)
+                }
+                Ok(AutoPushOutcome::Skipped) => {}
+                Err(err) => eprintln!("daemon: auto push error: {err}"),
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+    });
+}
+
+enum AutoPushOutcome {
+    Pushed,
+    Noop,
+    Skipped,
+}
+
+fn auto_push_repo(root: &str) -> Result<AutoPushOutcome, String> {
+    let ahead = match git::upstream_ahead_count_in_root(root)? {
+        Some(value) => value,
+        None => return Ok(AutoPushOutcome::Skipped),
+    };
+    if ahead == 0 {
+        return Ok(AutoPushOutcome::Noop);
+    }
+    if !git::working_tree_clean_in_root(root)? {
+        return Ok(AutoPushOutcome::Skipped);
+    }
+    git::push_in_root(root)?;
+    Ok(AutoPushOutcome::Pushed)
+}
+
+fn mark_auto_push_attempted(
+    registry: &Arc<Mutex<SessionRegistry>>,
+    root: &str,
+    now: i64,
+    timeout_secs: i64,
+) {
+    let mut guard = match registry.lock() {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    for session in guard.sessions.values_mut() {
+        if session.root != root {
+            continue;
+        }
+        if session.active {
+            continue;
+        }
+        if !session.explicit_end && !session.soft_end {
+            continue;
+        }
+        if now - session.last_activity < timeout_secs {
+            continue;
+        }
+        session.auto_push_attempted = true;
+    }
 }
 
 fn start_stdin_thread(registry: Arc<Mutex<SessionRegistry>>) {
@@ -732,6 +854,8 @@ fn update_registry(
         explicit_end: false,
         soft_end: false,
         active: true,
+        auto_push_attempted: false,
+        auto_push_last_attempt: 0,
     });
 
     entry.root = root.to_string();
@@ -740,13 +864,19 @@ fn update_registry(
         entry.explicit_end = true;
         entry.soft_end = false;
         entry.active = false;
+        entry.auto_push_attempted = false;
+        entry.auto_push_last_attempt = 0;
     } else if soft_end {
         entry.soft_end = true;
         entry.active = false;
+        entry.auto_push_attempted = false;
+        entry.auto_push_last_attempt = 0;
     } else {
         entry.explicit_end = false;
         entry.soft_end = false;
         entry.active = true;
+        entry.auto_push_attempted = false;
+        entry.auto_push_last_attempt = 0;
     }
 
     Ok(())

@@ -368,6 +368,12 @@ pub fn push() -> Result<(), String> {
     run_status(cmd)
 }
 
+pub fn push_in_root(root: &str) -> Result<(), String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).arg("push");
+    run_status(cmd)
+}
+
 pub fn head_commit() -> Result<String, String> {
     let root = repo_root()?;
     let output = Command::new("git")
@@ -567,6 +573,61 @@ pub fn working_tree_clean() -> Result<bool, String> {
     let root = repo_root()?;
     let paths = list_changed_paths_in_root(&root)?;
     Ok(paths.is_empty())
+}
+
+pub fn working_tree_clean_in_root(root: &str) -> Result<bool, String> {
+    let paths = list_changed_paths_in_root(root)?;
+    Ok(paths.is_empty())
+}
+
+pub fn upstream_ahead_count_in_root(root: &str) -> Result<Option<u64>, String> {
+    let upstream = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("--symbolic-full-name")
+        .arg("@{u}")
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !upstream.status.success() {
+        return Ok(None);
+    }
+
+    let upstream_name = String::from_utf8_lossy(&upstream.stdout).trim().to_string();
+    if upstream_name.is_empty() {
+        return Ok(None);
+    }
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("rev-list")
+        .arg("--left-right")
+        .arg("--count")
+        .arg("@{u}...HEAD")
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err("git rev-list failed".to_string());
+    }
+
+    let counts = String::from_utf8_lossy(&output.stdout);
+    let mut parts = counts.split_whitespace();
+    let _behind = parts
+        .next()
+        .ok_or_else(|| "missing behind count".to_string())?
+        .parse::<u64>()
+        .map_err(|_| "invalid behind count".to_string())?;
+    let ahead = parts
+        .next()
+        .ok_or_else(|| "missing ahead count".to_string())?
+        .parse::<u64>()
+        .map_err(|_| "invalid ahead count".to_string())?;
+
+    Ok(Some(ahead))
 }
 
 fn run_status_output(mut cmd: Command) -> Result<GitOutput, String> {

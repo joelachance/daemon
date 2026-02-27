@@ -1,35 +1,37 @@
 {
   "schema": 1,
   "session_id": "ses_362fd454dffexTw0qn5EWslw1M",
-  "summary": "remove unused functions",
-  "commit": null,
-  "paths": [],
-  "timestamp": "2026-02-27T05:19:02.236201Z",
+  "summary": "daemon: cursor poll error: Invalid column type Null at index: 1, name: cast(value as text)",
+  "commit": "d46352e895a61f7a182e7dfccf1c770f2a2c1a17",
+  "paths": [
+    "src/cursor.rs"
+  ],
+  "timestamp": "2026-02-27T05:20:01.029295Z",
   "tokens": {
-    "input": 1085,
-    "output": 136,
-    "total": 87877
+    "input": 407,
+    "output": 58,
+    "total": 87889
   },
   "tool_tokens": [],
   "meta": {
     "agent": "build",
     "finish": "stop",
-    "message_id": "msg_c9d889a65002LhXehqDATkz2Hu",
+    "message_id": "msg_c9d89c897002DWRNCOPZ5c8ss4",
     "mode": "build",
     "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d88a615001vQqiPln7zwK9at",
-    "part_time_created": 1772169504277,
+    "part_id": "prt_c9d89cda7001quiNdAvLyQCpIa",
+    "part_time_created": 1772169579944,
     "path": {
       "cwd": "/Users/joe/git/daemon",
       "root": "/Users/joe/git/daemon"
     },
     "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
     "prompt": {
-      "text": "remove unused functions"
+      "text": "daemon: cursor poll error: Invalid column type Null at index: 1, name: cast(value as text)\ndaemon: cursor poll error: Invalid column type Null at index: 1, name: cast(value as text)\ndaemon: cursor poll error: Invalid column type Null at index: 1, name: cast(value as text) "
     },
     "provider_id": "openai",
     "response": {
-      "text": "Removed the unused functions instead of allowing dead code.\n\nWhat changed\n- Deleted `init_repo` from `src/daemon.rs`.\n- Removed unused helpers from `src/git.rs`: `rev_list_range`, `push_force_with_lease`, `set_local_config`, `add_local_config_if_missing`, `remote_url`.\n\nIf you want, re-run `cargo check` to confirm warnings are gone."
+      "text": "Fixed Cursor polling to skip NULL values in `cast(value as text)` so it doesn’t error on null rows.\n\nRe-run your daemon and the cursor poll errors should stop. If you want, I can also add a lightweight debug log for null rows to confirm frequency."
     },
     "role": "assistant",
     "session_directory": "/Users/joe/git/daemon",

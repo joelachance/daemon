@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "session_id": "522fa3ce-1487-4a34-b7be-cc866259b38d",
+  "summary": "There's already a joke there. Let me replace it with a fresh one.",
+  "commit": null,
+  "paths": [],
+  "timestamp": "2026-02-27T05:18:59.282006Z",
+  "tokens": {
+    "input": 1,
+    "output": 1,
+    "total": 2
+  },
+  "tool_tokens": [],
+  "meta": {
+    "content_types": [
+      "text"
+    ],
+    "cwd": "/Users/joe/git/daemon",
+    "entry_uuid": "106cb1a1-5bbe-4811-8925-31c7abaefc10",
+    "git_branch": "main",
+    "is_api_error": null,
+    "message_id": "msg_01HFMEBYcQYq9fT3ecdKBSDu",
+    "model": "claude-sonnet-4-6",
+    "request_id": "req_011CYU2numJwFVuw4pm6d6tF",
+    "session_id": "522fa3ce-1487-4a34-b7be-cc866259b38d",
+    "slug": "precious-sauteeing-lynx",
+    "source": "claude",
+    "text": "There's already a joke there. Let me replace it with a fresh one.",
+    "timestamp": "2026-02-25T02:53:45.622Z",
+    "tool_use_names": [],
+    "version": "2.1.53"
+  }
+}

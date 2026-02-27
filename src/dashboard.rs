@@ -10,6 +10,13 @@ use std::fmt::Display;
 use std::io::{self, Write};
 use std::time::Duration;
 
+const DASHBOARD_BANNER: &str = r"██████╗ ██╗████████╗██████╗ ██████╗  ██████╗
+██╔════╝ ██║╚══██╔══╝██╔══██╗██╔══██╗██╔═══██╗
+██║  ███╗██║   ██║   ██████╔╝██████╔╝██║   ██║
+██║   ██║██║   ██║   ██╔═══╝ ██╔══██╗██║   ██║
+╚██████╔╝██║   ██║   ██║     ██║  ██║╚██████╔╝
+ ╚═════╝ ╚═╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝ ╚═════╝";
+
 pub fn run_dashboard() -> Result<(), String> {
     let mut stdout = io::stdout();
     let mut guard = RawModeGuard::new()?;
@@ -86,7 +93,10 @@ fn render(
     )
     .map_err(|err| err.to_string())?;
 
-    write_line(stdout, "gg live".with(Color::Cyan).bold())?;
+    for line in DASHBOARD_BANNER.lines() {
+        write_line(stdout, line.with(Color::Cyan).bold())?;
+    }
+    write_line(stdout, "Satori Computer Co".with(Color::Cyan).bold())?;
     write_line(
         stdout,
         "arrows/kj move  enter review (ended only)  ctrl+c end all  q quit".with(Color::DarkGrey),
@@ -150,7 +160,9 @@ fn build_frame_key(
     width: usize,
 ) -> Result<String, String> {
     let mut output = String::new();
-    output.push_str("gg live\n");
+    output.push_str(DASHBOARD_BANNER);
+    output.push('\n');
+    output.push_str("Satori Computer Co\n");
     output.push_str("arrows/kj move  enter review (ended only)  ctrl+c end all  q quit\n\n");
 
     if sessions.is_empty() {

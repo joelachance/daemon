@@ -21,9 +21,10 @@ pub fn run_dashboard() -> Result<(), String> {
         if cursor >= sessions.len() && !sessions.is_empty() {
             cursor = sessions.len() - 1;
         }
-        let frame = build_frame_key(&sessions, cursor, status_msg.as_deref())?;
+        let width = terminal::size().map(|(w, _)| w as usize).unwrap_or(100);
+        let frame = build_frame_key(&sessions, cursor, status_msg.as_deref(), width)?;
         if frame != last_frame {
-            render(&mut stdout, &sessions, cursor, status_msg.as_deref())?;
+            render(&mut stdout, &sessions, cursor, status_msg.as_deref(), width)?;
             last_frame = frame;
         }
 
@@ -75,6 +76,7 @@ fn render(
     sessions: &[SessionInfo],
     cursor_pos: usize,
     status_msg: Option<&str>,
+    width: usize,
 ) -> Result<(), String> {
     execute!(
         stdout,
@@ -98,11 +100,11 @@ fn render(
     }
 
     for (idx, session) in sessions.iter().enumerate() {
-        let cursor_mark = if idx == cursor_pos { ">" } else { " " };
+        let cursor_char = if idx == cursor_pos { ">" } else { " " };
         let cursor_mark = if idx == cursor_pos {
-            cursor_mark.with(Color::Green).bold()
+            cursor_char.with(Color::Green).bold()
         } else {
-            cursor_mark.with(Color::DarkGrey)
+            cursor_char.with(Color::DarkGrey)
         };
         let end_label = match session.end_status {
             Some(EndStatus::Explicit) => "ended".with(Color::Red).bold(),
@@ -114,29 +116,18 @@ fn render(
             .as_ref()
             .map(String::as_str)
             .unwrap_or("unknown");
-        let session_id = truncate(session.id.as_str(), 24);
-        let last_event = truncate(last_event, 19);
-        writeln!(
-            stdout,
-            "{} {}  {}  {} {}  {}",
-            cursor_mark,
-            session_id.with(Color::White).bold(),
-            format!("{} events", session.event_count).with(Color::DarkGrey),
-            "last".with(Color::DarkGrey),
-            last_event.with(Color::DarkGrey),
-            end_label
-        )
-        .map_err(|err| err.to_string())?;
+        let header_line =
+            session_header_line(&session.id, session.event_count, width.saturating_sub(2));
+        writeln!(stdout, "{} {}", cursor_mark, header_line.with(Color::White))
+            .map_err(|err| err.to_string())?;
+        let status_line = session_status_line(last_event, width);
+        writeln!(stdout, "{}", status_line.with(Color::DarkGrey)).map_err(|err| err.to_string())?;
+        writeln!(stdout, "{}", end_label).map_err(|err| err.to_string())?;
 
         let commits = load_recent_commits(&session.id, 6)?;
         for commit in commits {
-            writeln!(
-                stdout,
-                "    {}  {}",
-                short_hash(&commit.commit).with(Color::DarkGrey),
-                truncate(&commit.summary, 72).with(Color::White)
-            )
-            .map_err(|err| err.to_string())?;
+            let commit_line = commit_line(&commit, width);
+            writeln!(stdout, "{}", commit_line).map_err(|err| err.to_string())?;
         }
     }
 
@@ -153,6 +144,7 @@ fn build_frame_key(
     sessions: &[SessionInfo],
     cursor_pos: usize,
     status_msg: Option<&str>,
+    width: usize,
 ) -> Result<String, String> {
     let mut output = String::new();
     output.push_str("gg live\n");
@@ -164,28 +156,31 @@ fn build_frame_key(
 
     for (idx, session) in sessions.iter().enumerate() {
         let cursor_mark = if idx == cursor_pos { ">" } else { " " };
+        let header_line =
+            session_header_line(&session.id, session.event_count, width.saturating_sub(2));
+        output.push_str(&format!("{} {}", cursor_mark, header_line));
+        output.push('\n');
+        output.push_str(&session_status_line(
+            session
+                .last_event
+                .as_ref()
+                .map(String::as_str)
+                .unwrap_or("unknown"),
+            width,
+        ));
+        output.push('\n');
         let end_label = match session.end_status {
             Some(EndStatus::Explicit) => "ended",
             Some(EndStatus::Soft) => "soft end",
             None => "active",
         };
-        let last_event = session
-            .last_event
-            .as_ref()
-            .map(String::as_str)
-            .unwrap_or("unknown");
-        output.push_str(&format!(
-            "{} {}  {} events  last {}  {}\n",
-            cursor_mark, session.id, session.event_count, last_event, end_label
-        ));
+        output.push_str(end_label);
+        output.push('\n');
 
         let commits = load_recent_commits(&session.id, 6)?;
         for commit in commits {
-            output.push_str(&format!(
-                "    {}  {}\n",
-                short_hash(&commit.commit),
-                commit.summary
-            ));
+            output.push_str(&commit_line_plain(&commit, width));
+            output.push('\n');
         }
     }
 
@@ -210,9 +205,40 @@ fn short_hash(value: &str) -> String {
     value.chars().take(7).collect::<String>()
 }
 
-fn truncate(value: &str, max_len: usize) -> String {
+fn session_header_line(session_id: &str, count: usize, width: usize) -> String {
+    let line = format!("{}  {} events", session_id, count);
+    truncate_to_width(&line, width)
+}
+
+fn session_status_line(last_event: &str, width: usize) -> String {
+    let line = format!("    last {}", last_event);
+    truncate_to_width(&line, width)
+}
+
+fn commit_line(commit: &SessionCommit, width: usize) -> String {
+    let prefix = format!("    {} ", short_hash(&commit.commit));
+    let available = width.saturating_sub(prefix.chars().count());
+    let summary = truncate_to_width(&commit.summary, available);
+    format!(
+        "{}{}",
+        prefix.with(Color::DarkGrey),
+        summary.with(Color::White)
+    )
+}
+
+fn commit_line_plain(commit: &SessionCommit, width: usize) -> String {
+    let prefix = format!("    {} ", short_hash(&commit.commit));
+    let available = width.saturating_sub(prefix.chars().count());
+    let summary = truncate_to_width(&commit.summary, available);
+    format!("{}{}", prefix, summary)
+}
+
+fn truncate_to_width(value: &str, max_len: usize) -> String {
     if value.chars().count() <= max_len {
         return value.to_string();
+    }
+    if max_len <= 3 {
+        return value.chars().take(max_len).collect::<String>();
     }
     let mut out = value
         .chars()

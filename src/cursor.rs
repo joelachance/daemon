@@ -272,7 +272,7 @@ fn fetch_sessions_for_repo(conn: &Connection, root: &Path) -> Result<Vec<CursorS
     let rows = stmt
         .query_map([], |row| {
             let key: String = row.get(0)?;
-            let value: String = row.get(1)?;
+            let value: Option<String> = row.get(1)?;
             Ok((key, value))
         })
         .map_err(|err| err.to_string())?;
@@ -280,6 +280,10 @@ fn fetch_sessions_for_repo(conn: &Connection, root: &Path) -> Result<Vec<CursorS
     let mut sessions = Vec::new();
     for row in rows {
         let (key, value) = row.map_err(|err| err.to_string())?;
+        let value = match value {
+            Some(value) => value,
+            None => continue,
+        };
         if !value.contains(&repo_str) && !value.contains(&repo_uri) {
             continue;
         }

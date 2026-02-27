@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "session_id": "ses_362d0fc3cffekXXjn3ZDl7T2vv",
+  "summary": "Unified session model + registry",
+  "commit": null,
+  "paths": [],
+  "timestamp": "2026-02-27T05:19:00.52541Z",
+  "tokens": {
+    "input": 2804,
+    "output": 2290,
+    "total": 28262
+  },
+  "tool_tokens": [],
+  "meta": {
+    "agent": "plan",
+    "finish": "stop",
+    "message_id": "msg_c9d2f232b002SgOCgWrLaL4cmm",
+    "mode": "plan",
+    "model_id": "gpt-5.2-codex",
+    "part_id": "prt_c9d2f79f1001bnouaHpV61SHzq",
+    "part_time_created": 1772163660273,
+    "path": {
+      "cwd": "/Users/joe/git/daemon",
+      "root": "/Users/joe/git/daemon"
+    },
+    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
+    "prompt": {
+      "text": "Unified session model + registry\nYou are working in READ-ONLY mode. Do NOT edit, create, or delete files. You may only read files and report findings.\nGoal: Implement Step 3 — Unified session model + registry.\nRequirements:\n- Define a unified session event struct (tool, session_id, repo_root, prompt, response, model, tokens, timestamps).\n- Add a daemon-side registry for active sessions and state transitions.\n- Session end only on tool-level end flag or Ctrl+G.\nWhat to do:\n1) Inspect session-related structs in src/session.rs and metadata flow in src/daemon.rs.\n2) Identify how session metadata is stored today (notes/refs).\n3) Propose a unified event model and where to store it.\n4) Draft a concrete change plan:\n   - new/modified structs\n   - registry data structure in daemon\n   - how events are appended\nDeliverable:\n- A short report listing:\n  - files to change\n  - new structs and fields\n  - daemon registry approach\n  - event flow outline\nConstraints:\n- No file edits\n- No running git commands\n- Only read/inspect code\nRepository root: /Users/joe/git/daemon "
+    },
+    "provider_id": "openai",
+    "response": {
+      "text": "Here’s a short report based on `src/session.rs` and `src/daemon.rs` plus current storage in `src/git.rs`.\n\nCurrent metadata storage\n- Session events are stored as commits under `refs/gg/sessions/<session_id>` with `event.json` payloads via `git::append_session_event_in_root` in `src/git.rs`.\n- The same payload is optionally written as git notes on the commit in `refs/notes/gg` via `git::write_notes_in_root` in `src/daemon.rs`.\n\nFiles to change\n- `src/session.rs` (add unified event struct; possibly move/extend token structs)\n- `src/daemon.rs` (request/response shape, event creation, registry/state transitions)\n- `src/git.rs` (no new storage primitives needed; reuse append to `refs/gg/sessions`, notes)\n\nNew/modified structs and fields\n- New unified event struct in `src/session.rs` (exported for use by daemon):\n  - `SessionEvent` (or `UnifiedSessionEvent`)\n    - `tool: String`\n    - `session_id: String`\n    - `repo_root: String`\n    - `prompt: Option<String>`\n    - `response: Option<String>`\n    - `model: Option<String>`\n    - `tokens: Option<TokenUsage>`\n    - `timestamps: { started_at: String, ended_at: Option<String> }` (or `event_at` + `started_at`/`ended_at` if you want a separate event timestamp)\n    - optional `tool_tokens: Vec<ToolTokenUsage>` if you want to preserve existing detail\n- Replace `SessionEventPayload` in `src/daemon.rs` with the unified struct and serialize directly as `event.json`.\n- Extend `Request` in `src/daemon.rs`:\n  - add `tool`, `prompt`, `response`, `model`, `timestamps` (or start/end fields)\n  - add `tool_end: Option<bool>` (or `session_end`) to control session closure\n  - keep `meta` if still needed, but long-term you can migrate metadata into structured fields\n\nDaemon registry approach\n- Add an in-memory registry in `src/daemon.rs`:\n  - `static SESSION_REGISTRY: Lazy<Mutex<HashMap<String, SessionState>>>`\n  - `SessionState { session_id, repo_root, status, started_at, last_event_at, last_tool }`\n  - `SessionStatus` enum: `Active | Ended`\n- State transitions:\n  - First event for a `session_id` creates `Active` with `started_at`.\n  - Each event updates `last_event_at`/`last_tool`.\n  - **End only** when `tool_end == true` (tool-level end flag) or a Ctrl+G-triggered request marks end; otherwise keep `Active` even if summary/commit occurs.\n\nEvent flow outline\n- CLI sends `event` request with `tool`, `session_id`, `prompt`, `response`, `model`, `tokens`, `timestamps`, `tool_end` (true only at tool-level end or Ctrl+G).\n- Daemon resolves `repo_root`, builds unified `SessionEvent`, appends to `refs/gg/sessions/<session_id>` (as today), and writes notes if commit exists.\n- Registry updates:\n  - on first event: insert `Active`\n  - on `tool_end`/Ctrl+G: mark `Ended` (and optionally remove from active map)\n\nIf you want, I can also scan for where Ctrl+G is emitted to confirm whether it should set `tool_end` in the request or use a separate request kind."
+    },
+    "role": "assistant",
+    "session_directory": "/Users/joe/git/daemon",
+    "session_id": "ses_362d0fc3cffekXXjn3ZDl7T2vv",
+    "session_title": "Unified session model + registry planning",
+    "source": "opencode"
+  }
+}

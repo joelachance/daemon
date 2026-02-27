@@ -1,40 +1,16 @@
 {
   "schema": 1,
   "session_id": "ses_362d71707ffe58WqCtCxv95mea",
-  "summary": "Work on what we currently have right now; we can deal with prompt behavior and the GG status later",
+  "summary": "session timeout",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:00.565835Z",
-  "tokens": {
-    "input": 8967,
-    "output": 56,
-    "total": 30143
-  },
+  "timestamp": "2026-02-27T05:19:02.343205Z",
+  "tokens": null,
   "tool_tokens": [],
   "meta": {
-    "agent": "build",
-    "finish": "stop",
-    "message_id": "msg_c9d300670001Hcrwjod01bGTv9",
-    "mode": "build",
-    "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d300ff7001uyT9dA86Ei28pr",
-    "part_time_created": 1772163698679,
-    "path": {
-      "cwd": "/Users/joe/git/daemon",
-      "root": "/Users/joe/git/daemon"
-    },
-    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
-    "prompt": {
-      "text": "Work on what we currently have right now; we can deal with prompt behavior and the GG status later "
-    },
-    "provider_id": "openai",
-    "response": {
-      "text": "Got it. The CLI surface, help, and daemon start behavior are updated to the current requirements. Let me know when you’re ready to tackle prompt mode or `gg status` UI."
-    },
-    "role": "assistant",
-    "session_directory": "/Users/joe/git/daemon",
     "session_id": "ses_362d71707ffe58WqCtCxv95mea",
-    "session_title": "CLI surface overhaul for gg tool command routing",
-    "source": "opencode"
+    "soft_end": true,
+    "source": "opencode",
+    "timeout_secs": 600
   }
 }

@@ -1,40 +1,16 @@
 {
   "schema": 1,
   "session_id": "ses_362b7f672ffe5Kh81I8r7bzBm8",
-  "summary": "go",
+  "summary": "session timeout",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:01.78094Z",
-  "tokens": {
-    "input": 206,
-    "output": 805,
-    "total": 86515
-  },
+  "timestamp": "2026-02-27T05:19:02.307274Z",
+  "tokens": null,
   "tool_tokens": [],
   "meta": {
-    "agent": "build",
-    "finish": "stop",
-    "message_id": "msg_c9d6698e5002fx3GoYj3eVi2eg",
-    "mode": "build",
-    "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d66dac3001FRDphucP9BidYL",
-    "part_time_created": 1772167289539,
-    "path": {
-      "cwd": "/Users/joe/git/daemon",
-      "root": "/Users/joe/git/daemon"
-    },
-    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
-    "prompt": {
-      "text": "go"
-    },
-    "provider_id": "openai",
-    "response": {
-      "text": "Implemented Claude Code session harvesting from the real local storage layout in `~/.claude/projects`, emitting one event per assistant text response and tracking per-session offsets to avoid replays. Also wired a poll thread into the daemon and documented the on-disk schema and repo mapping in `schemas/claude.md`.\n\nDetails\n- New harvesting module in `src/claude.rs` reads `<project_dir>/<session_id>.jsonl`, extracts assistant text + usage, and emits session events with rich meta.\n- Daemon now starts a Claude poll loop alongside Cursor (`src/daemon.rs`), with env overrides for repo and directories.\n- Schema docs updated with paths, JSONL structure, and mapping rules (`schemas/claude.md`).\n\nFiles changed/added\n- `src/claude.rs`\n- `src/daemon.rs`\n- `src/main.rs`\n- `schemas/claude.md`\n\nEnv knobs added\n- `GG_CLAUDE_POLL`, `GG_CLAUDE_POLL_SECS`\n- `GG_CLAUDE_REPO`\n- `GG_CLAUDE_DIR`, `GG_CLAUDE_PROJECTS_DIR`\n\nNext steps\n1) Run `cargo build` to ensure it compiles.\n2) Start the daemon and generate a Claude Code response in this repo, then verify a new session event appears under `refs/gg/sessions/<session_id>`."
-    },
-    "role": "assistant",
-    "session_directory": "/Users/joe/git/daemon",
     "session_id": "ses_362b7f672ffe5Kh81I8r7bzBm8",
-    "session_title": "Claude Code session harvesting plan (read-only)",
-    "source": "opencode"
+    "soft_end": true,
+    "source": "opencode",
+    "timeout_secs": 600
   }
 }

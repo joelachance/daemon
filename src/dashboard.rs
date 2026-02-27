@@ -6,6 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::style::{Color, Stylize};
 use crossterm::terminal;
+use std::fmt::Display;
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -85,18 +86,15 @@ fn render(
     )
     .map_err(|err| err.to_string())?;
 
-    writeln!(stdout, "{}", "gg live".with(Color::Cyan).bold()).map_err(|err| err.to_string())?;
-    writeln!(
+    write_line(stdout, "gg live".with(Color::Cyan).bold())?;
+    write_line(
         stdout,
-        "{}",
-        "arrows/kj move  enter review (ended only)  ctrl+c end all  q quit".with(Color::DarkGrey)
-    )
-    .map_err(|err| err.to_string())?;
-    writeln!(stdout).map_err(|err| err.to_string())?;
+        "arrows/kj move  enter review (ended only)  ctrl+c end all  q quit".with(Color::DarkGrey),
+    )?;
+    write_blank_line(stdout)?;
 
     if sessions.is_empty() {
-        writeln!(stdout, "{}", "no sessions found".with(Color::Yellow))
-            .map_err(|err| err.to_string())?;
+        write_line(stdout, "no sessions found".with(Color::Yellow))?;
     }
 
     for (idx, session) in sessions.iter().enumerate() {
@@ -118,26 +116,36 @@ fn render(
             .unwrap_or("unknown");
         let header_line =
             session_header_line(&session.id, session.event_count, width.saturating_sub(2));
-        writeln!(stdout, "{} {}", cursor_mark, header_line.with(Color::White))
-            .map_err(|err| err.to_string())?;
+        write_line(
+            stdout,
+            format!("{} {}", cursor_mark, header_line.with(Color::White)),
+        )?;
         let status_line = session_status_line(last_event, width);
-        writeln!(stdout, "{}", status_line.with(Color::DarkGrey)).map_err(|err| err.to_string())?;
-        writeln!(stdout, "{}", end_label).map_err(|err| err.to_string())?;
+        write_line(stdout, status_line.with(Color::DarkGrey))?;
+        write_line(stdout, end_label)?;
 
         let commits = load_recent_commits(&session.id, 6)?;
         for commit in commits {
             let commit_line = commit_line(&commit, width);
-            writeln!(stdout, "{}", commit_line).map_err(|err| err.to_string())?;
+            write_line(stdout, commit_line)?;
         }
     }
 
     if let Some(message) = status_msg {
-        writeln!(stdout).map_err(|err| err.to_string())?;
-        writeln!(stdout, "{}", message.with(Color::Yellow)).map_err(|err| err.to_string())?;
+        write_blank_line(stdout)?;
+        write_line(stdout, message.with(Color::Yellow))?;
     }
 
     stdout.flush().map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn write_line(stdout: &mut io::Stdout, content: impl Display) -> Result<(), String> {
+    write!(stdout, "\r{}\r\n", content).map_err(|err| err.to_string())
+}
+
+fn write_blank_line(stdout: &mut io::Stdout) -> Result<(), String> {
+    write!(stdout, "\r\n").map_err(|err| err.to_string())
 }
 
 fn build_frame_key(

@@ -1,40 +1,16 @@
 {
   "schema": 1,
   "session_id": "ses_362d0b085ffeEKX7UddpUcznpG",
-  "summary": "I don't think we have one yet. Let's just work with what we currently have and we'll go from there. We can change the sc...",
+  "summary": "session timeout",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:01.447734Z",
-  "tokens": {
-    "input": 779,
-    "output": 900,
-    "total": 72975
-  },
+  "timestamp": "2026-02-27T05:19:02.556837Z",
+  "tokens": null,
   "tool_tokens": [],
   "meta": {
-    "agent": "build",
-    "finish": "stop",
-    "message_id": "msg_c9d4cabf9002QNvrXInhh1baLO",
-    "mode": "build",
-    "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d4cd22e001DdUGhjA67YedOy",
-    "part_time_created": 1772165583406,
-    "path": {
-      "cwd": "/Users/joe/git/daemon",
-      "root": "/Users/joe/git/daemon"
-    },
-    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
-    "prompt": {
-      "text": "I don't think we have one yet. Let's just work with what we currently have and we'll go from there. We can change the schema as we go "
-    },
-    "provider_id": "openai",
-    "response": {
-      "text": "Added per-bubble ingestion in `src/cursor.rs` so Cursor sessions now emit events for each assistant response, with prompt context and tool call metadata captured from bubble records, while keeping the existing completion event for backwards compatibility. Updated `schemas/cursor.md` to document the confirmed bubble field names and type mapping.\n\nDetails\n- `src/cursor.rs` now opens the Cursor DB once per poll, extracts ordered `fullConversationHeadersOnly` bubble IDs, and reads each `bubbleId:<composer_id>:<bubble_id>` record.\n- Assistant bubbles (`type=2`) emit events with summary derived from `text`/`thinking.text` or tool call name, plus prompt context from the most recent user bubble (`type=1`) in `meta.prompt`.\n- Tool call data (`toolFormerData`) and token counts (`tokenCount`) are included in event metadata; token usage is populated per bubble when present.\n- State tracking now includes `last_bubble` so previously-emitted bubbles are not reprocessed.\n\nFiles touched\n- `src/cursor.rs`\n- `schemas/cursor.md`\n\nTests not run.\n\nNext steps (pick one)\n1. Run the daemon and verify new per-bubble events are appended in `refs/gg/sessions/<composer_id>`.\n2. If you want to suppress the session-complete event or change its payload, tell me and I’ll adjust."
-    },
-    "role": "assistant",
-    "session_directory": "/Users/joe/git/daemon",
     "session_id": "ses_362d0b085ffeEKX7UddpUcznpG",
-    "session_title": "Cursor ingestion plan for full prompt/response extraction",
-    "source": "opencode"
+    "soft_end": true,
+    "source": "opencode",
+    "timeout_secs": 600
   }
 }

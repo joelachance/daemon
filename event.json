@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "session_id": "cc9d9fec-aa94-4287-94a0-e13bbcbe85cc",
+  "summary": "API Error: 400 {\"error\":{\"type\":\"invalid_request_error\",\"message\":\"model must be 'satori:frontier-5.5'\",\"param\":\"model\"}}",
+  "commit": null,
+  "paths": [],
+  "timestamp": "2026-02-27T05:18:59.162479Z",
+  "tokens": null,
+  "tool_tokens": [],
+  "meta": {
+    "content_types": [
+      "text"
+    ],
+    "cwd": "/Users/joe/git/daemon",
+    "entry_uuid": "1277edaf-5591-4f13-87d7-9a9001f2ed16",
+    "git_branch": "main",
+    "is_api_error": true,
+    "message_id": "e0f044cb-e6ba-4a1f-94e2-f4648d45c55a",
+    "model": "<synthetic>",
+    "request_id": null,
+    "session_id": "cc9d9fec-aa94-4287-94a0-e13bbcbe85cc",
+    "slug": null,
+    "source": "claude",
+    "text": "API Error: 400 {\"error\":{\"type\":\"invalid_request_error\",\"message\":\"model must be 'satori:frontier-5.5'\",\"param\":\"model\"}}",
+    "timestamp": "2026-02-25T02:51:47.945Z",
+    "tool_use_names": [],
+    "version": "2.1.53"
+  }
+}

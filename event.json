@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "session_id": "ses_3657b8f72ffe7ZRG1HC06cdAXk",
+  "summary": "tell me about the different parts of this diff:",
+  "commit": null,
+  "paths": [],
+  "timestamp": "2026-02-27T05:18:59.87704Z",
+  "tokens": {
+    "input": 14079,
+    "output": 338,
+    "total": 14417
+  },
+  "tool_tokens": [],
+  "meta": {
+    "agent": "build",
+    "finish": "stop",
+    "message_id": "msg_c9a847099001OVWVo42OlOyMGJ",
+    "mode": "build",
+    "model_id": "gpt-5.2-codex",
+    "part_id": "prt_c9a847d8f001K1GtJNn7fbXUiE",
+    "part_time_created": 1772118900111,
+    "path": {
+      "cwd": "/Users/joe/git/daemon",
+      "root": "/Users/joe/git/daemon"
+    },
+    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
+    "prompt": {
+      "text": "tell me about the different parts of this diff: \n\ndiff --git a/README.md b/README.md\nindex 51e09a6..05299bd 100644\n--- a/README.md\n+++ b/README.md\n@@ -13,6 +13,8 @@ Minimal Rust skeleton for an AI-native Git/JJ porcelain wrapper.\n Run `gg init` once per repo to configure git notes/refs and co-author identity.\n It will prompt for a co-author name unless you pass `--coauthor` or\n `--no-coauthor`.\n+You can also set default output behavior with `--git-stdout`/`--no-git-stdout`\n+and `--compact`/`--no-compact` (stored in `gg.git-stdout` and `gg.compact`).\n\n ## Output customization\n Colors and spinner behavior can be configured via environment variables:\n@@ -23,6 +25,8 @@ Colors and spinner behavior can be configured via environment variables:\n - `GG_COLOR_HASH` (default: yellow)\n - `GG_COLOR_DIM` (default: dim/no color)\n - Use `--compact` for a one-line summary (Pretty Mode is default).\n+- `gg init --git-stdout` and `gg init --compact` set repo defaults.\n+- Use `--no-git-stdout` or `--no-compact` to disable those defaults.\n\n Supported color names: black, red, green, yellow, blue, magenta, cyan, white,\n brightblack/gray, brightred, brightgreen, brightyellow, brightblue,\n@@ -33,6 +37,8 @@ brightmagenta, brightcyan, brightwhite. Use `none` to disable a color.\n gg init\n gg session event --session ses_123 --summary \"Add tests\" --path src/lib.rs\n gg session event --session ses_123 --summary \"Fix bug\" --tokens-in 1200 --tokens-out 250 --tool-token bash:30:10:system --git-stdout --compact\n+gg summary --session-id ses_123\n+gg sessions\n ```\n\n ## Joke\n(END) "
+    },
+    "provider_id": "openai",
+    "response": {
+      "text": "This diff shows two added blocks in `README.md`, plus the standard diff metadata.\n\nWhat each part means:\n- `diff --git a/README.md b/README.md`: file being compared (old vs new).\n- `index 51e09a6..05299bd 100644`: old/new blob hashes and file mode.\n- `--- a/README.md` / `+++ b/README.md`: old and new file labels.\n- `@@ -13,6 +13,8 @@`: hunk header; in the old file starting at line 13 with 6 lines of context, in the new file starting at line 13 with 8 lines (because 2 lines were added).\n\nContent changes:\n- At the top section, two lines were added explaining `gg init` defaults:\n  - `--git-stdout`/`--no-git-stdout` and `--compact`/`--no-compact`\n  - Notes those defaults are stored in `gg.git-stdout` and `gg.compact`.\n- In “Output customization”, two lines were added explaining:\n  - `gg init --git-stdout` and `gg init --compact` set repo defaults.\n  - `--no-git-stdout` and `--no-compact` disable those defaults.\n- In the example commands block, two new commands were added:\n  - `gg summary --session-id ses_123`\n  - `gg sessions`\n\nNet effect: only documentation additions, no removals."
+    },
+    "role": "assistant",
+    "session_directory": "/Users/joe/git/daemon",
+    "session_id": "ses_3657b8f72ffe7ZRG1HC06cdAXk",
+    "session_title": "Diff parts and new defaults in README.md for gg init, git-stdout, compact",
+    "source": "opencode"
+  }
+}

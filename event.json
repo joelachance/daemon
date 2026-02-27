@@ -1,40 +1,16 @@
 {
   "schema": 1,
   "session_id": "ses_362b745dbfferNJVwRXFkWZ8yR",
-  "summary": "build",
+  "summary": "session timeout",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:01.613901Z",
-  "tokens": {
-    "input": 248,
-    "output": 252,
-    "total": 43764
-  },
+  "timestamp": "2026-02-27T05:19:02.271948Z",
+  "tokens": null,
   "tool_tokens": [],
   "meta": {
-    "agent": "build",
-    "finish": "stop",
-    "message_id": "msg_c9d5cae74002Le7GcJckGd2Tqf",
-    "mode": "build",
-    "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d5cbab1001fK57s2hsF39D2z",
-    "part_time_created": 1772166625969,
-    "path": {
-      "cwd": "/Users/joe/git/daemon",
-      "root": "/Users/joe/git/daemon"
-    },
-    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
-    "prompt": {
-      "text": "build"
-    },
-    "provider_id": "openai",
-    "response": {
-      "text": "Implemented Step 9 remote handling in the status UI push flow: if no remote exists, it now prompts for an origin URL and adds it before pushing; push still only runs when a remote exists and the working tree is clean. Added a git helper to add remotes.\n\nChanges\n- Added `git::add_remote` in `src/git.rs`.\n- Updated `maybe_push` in `src/status.rs` to prompt for origin URL, add the remote, then gate push on remote existence and clean working tree.\n- Prompt disables raw mode and shows cursor so input works in the status UI (`src/status.rs`).\n\nFiles updated\n- `src/git.rs`\n- `src/status.rs`\n\nNext steps (optional)\n1. Run `cargo test` if you want a quick sanity check.\n2. Try `gg status` and trigger a push to verify the prompt + push path."
-    },
-    "role": "assistant",
-    "session_directory": "/Users/joe/git/daemon",
     "session_id": "ses_362b745dbfferNJVwRXFkWZ8yR",
-    "session_title": "Remote handling and git push gating plan",
-    "source": "opencode"
+    "soft_end": true,
+    "source": "opencode",
+    "timeout_secs": 600
   }
 }

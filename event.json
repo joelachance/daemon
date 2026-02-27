@@ -1,35 +1,35 @@
 {
   "schema": 1,
   "session_id": "ses_362b7f672ffe5Kh81I8r7bzBm8",
-  "summary": "Claude Code ingestion",
+  "summary": "go",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:01.21388Z",
+  "timestamp": "2026-02-27T05:19:01.78094Z",
   "tokens": {
-    "input": 1129,
-    "output": 1830,
-    "total": 39951
+    "input": 206,
+    "output": 805,
+    "total": 86515
   },
   "tool_tokens": [],
   "meta": {
-    "agent": "plan",
+    "agent": "build",
     "finish": "stop",
-    "message_id": "msg_c9d485927002BGv1FDFHKj00Uo",
-    "mode": "plan",
+    "message_id": "msg_c9d6698e5002fx3GoYj3eVi2eg",
+    "mode": "build",
     "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d48a0c40012fa6B9s5A1tCDd",
-    "part_time_created": 1772165308612,
+    "part_id": "prt_c9d66dac3001FRDphucP9BidYL",
+    "part_time_created": 1772167289539,
     "path": {
       "cwd": "/Users/joe/git/daemon",
       "root": "/Users/joe/git/daemon"
     },
     "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
     "prompt": {
-      "text": "Claude Code ingestion\nYou are working in READ-ONLY mode. Do NOT edit, create, or delete files. You may only read files and report findings.\nGoal: Implement Step 6 — Claude Code session harvesting.\nRequirements:\n- Identify Claude Code storage location(s) and schema.\n- Map sessions to repo.\n- Emit events per assistant response.\n- No inactivity end detection.\nWhat to do:\n1) Inspect existing placeholders in schemas/claude.md.\n2) Search for any existing Claude Code integration stubs.\n3) Propose discovery steps for local storage (paths, file types).\n4) Draft a concrete change plan:\n   - new module file\n   - event extraction logic\n   - schema documentation updates\nDeliverable:\n- A short report listing:\n  - files to change/add\n  - proposed storage locations to test\n  - event extraction approach\nConstraints:\n- No file edits\n- No running git commands\n- Only read/inspect code\nRepository root: /Users/joe/git/daemon "
+      "text": "go"
     },
     "provider_id": "openai",
     "response": {
-      "text": "Quick read-only findings from the repo:\n\n- `schemas/claude.md` is a placeholder with TODOs for storage location, schema, repo mapping, and session start/end.\n- No existing Claude Code integration stubs in `src/`; only Cursor ingestion exists (`src/cursor.rs`).\n- Event storage is handled by `daemon::send_event` + `git::append_session_event_in_root` (session refs + notes).\n\n**Report**\n- files to change/add\n  - Add: `src/claude.rs` (Claude Code harvesting module)\n  - Update: `src/daemon.rs` (start Claude poll thread, env flags)\n  - Update: `src/main.rs` (add `mod claude;`)\n  - Update: `schemas/claude.md` (fill in storage paths, schema, repo mapping, extraction notes)\n  - Optional: `README.md` (document Claude poll env flags)\n\n- proposed storage locations to test\n  - macOS app storage (Electron-style)\n    - `~/Library/Application Support/Claude/`\n    - `~/Library/Application Support/Claude Code/`\n    - `~/Library/Application Support/Anthropic/Claude/`\n    - `~/Library/Application Support/Claude Desktop/`\n    - Look for `Local Storage/leveldb`, `IndexedDB`, or `.sqlite`/`.db` files\n  - VS Code extension storage (if Claude Code is a VS Code extension)\n    - `~/Library/Application Support/Code/User/globalStorage/<extension-id>/`\n    - `~/Library/Application Support/Code/User/workspaceStorage/<workspace_id>/`\n    - extension IDs to try: `anthropic.claude-code`, `anthropic.claude`\n  - CLI-style config/data\n    - `~/.claude/`\n    - `~/.config/claude/`\n    - `~/.config/anthropic/`\n    - `~/.local/share/claude/` (cross‑platform check)\n\n- event extraction approach\n  - Poll storage read-only for sessions/conversations and assistant message records.\n  - Map session to repo by:\n    - explicit repo path/URI in session metadata, or\n    - file context entries referencing `file://` or absolute paths, or\n    - workspace mapping file if stored per workspace (same approach as `schemas/cursor.md`).\n  - Emit an event per assistant response:\n    - `session_id`: stable conversation ID from Claude storage\n    - `summary`: first line of assistant response (trimmed)\n    - `meta`: include `source=\"claude\"`, `conversation_id`, `message_id`, `model`, timestamps, tool call info, file paths\n    - `tokens`: map from stored usage if present\n  - Maintain `.git/gg/claude.json` state (like Cursor) to avoid re‑emitting already‑seen responses.\n  - No inactivity end detection: do not infer “session end”; only emit per assistant response.\n\nIf you want, I can next provide a more concrete plan once we’ve actually located the on-disk Claude storage and inspected its schema."
+      "text": "Implemented Claude Code session harvesting from the real local storage layout in `~/.claude/projects`, emitting one event per assistant text response and tracking per-session offsets to avoid replays. Also wired a poll thread into the daemon and documented the on-disk schema and repo mapping in `schemas/claude.md`.\n\nDetails\n- New harvesting module in `src/claude.rs` reads `<project_dir>/<session_id>.jsonl`, extracts assistant text + usage, and emits session events with rich meta.\n- Daemon now starts a Claude poll loop alongside Cursor (`src/daemon.rs`), with env overrides for repo and directories.\n- Schema docs updated with paths, JSONL structure, and mapping rules (`schemas/claude.md`).\n\nFiles changed/added\n- `src/claude.rs`\n- `src/daemon.rs`\n- `src/main.rs`\n- `schemas/claude.md`\n\nEnv knobs added\n- `GG_CLAUDE_POLL`, `GG_CLAUDE_POLL_SECS`\n- `GG_CLAUDE_REPO`\n- `GG_CLAUDE_DIR`, `GG_CLAUDE_PROJECTS_DIR`\n\nNext steps\n1) Run `cargo build` to ensure it compiles.\n2) Start the daemon and generate a Claude Code response in this repo, then verify a new session event appears under `refs/gg/sessions/<session_id>`."
     },
     "role": "assistant",
     "session_directory": "/Users/joe/git/daemon",

@@ -13,13 +13,18 @@ pub fn run_dashboard() -> Result<(), String> {
     let mut guard = RawModeGuard::new()?;
     let mut cursor = 0usize;
     let mut status_msg: Option<String> = None;
+    let mut last_frame = String::new();
 
     loop {
         let sessions = store::list_sessions()?;
         if cursor >= sessions.len() && !sessions.is_empty() {
             cursor = sessions.len() - 1;
         }
-        render(&mut stdout, &sessions, cursor, status_msg.as_deref())?;
+        let frame = build_frame(&sessions, cursor, status_msg.as_deref())?;
+        if frame != last_frame {
+            render(&mut stdout, &frame)?;
+            last_frame = frame;
+        }
 
         if event::poll(Duration::from_millis(600)).map_err(|err| err.to_string())? {
             if let Event::Key(key) = event::read().map_err(|err| err.to_string())? {
@@ -64,29 +69,29 @@ pub fn run_dashboard() -> Result<(), String> {
     Ok(())
 }
 
-fn render(
-    stdout: &mut io::Stdout,
+fn render(stdout: &mut io::Stdout, frame: &str) -> Result<(), String> {
+    execute!(
+        stdout,
+        cursor::MoveTo(0, 0),
+        terminal::Clear(terminal::ClearType::FromCursorDown)
+    )
+    .map_err(|err| err.to_string())?;
+    write!(stdout, "{frame}").map_err(|err| err.to_string())?;
+    stdout.flush().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn build_frame(
     sessions: &[SessionInfo],
     cursor_pos: usize,
     status_msg: Option<&str>,
-) -> Result<(), String> {
-    execute!(
-        stdout,
-        terminal::Clear(terminal::ClearType::All),
-        cursor::MoveTo(0, 0)
-    )
-    .map_err(|err| err.to_string())?;
-
-    writeln!(stdout, "gg live").map_err(|err| err.to_string())?;
-    writeln!(
-        stdout,
-        "arrows/kj move  enter review (ended only)  ctrl+c end all  q quit"
-    )
-    .map_err(|err| err.to_string())?;
-    writeln!(stdout).map_err(|err| err.to_string())?;
+) -> Result<String, String> {
+    let mut output = String::new();
+    output.push_str("gg live\n");
+    output.push_str("arrows/kj move  enter review (ended only)  ctrl+c end all  q quit\n\n");
 
     if sessions.is_empty() {
-        writeln!(stdout, "no sessions found").map_err(|err| err.to_string())?;
+        output.push_str("no sessions found\n");
     }
 
     for (idx, session) in sessions.iter().enumerate() {
@@ -101,32 +106,28 @@ fn render(
             .as_ref()
             .map(String::as_str)
             .unwrap_or("unknown");
-        writeln!(
-            stdout,
-            "{} {}  {} events  last {}  {}",
+        output.push_str(&format!(
+            "{} {}  {} events  last {}  {}\n",
             cursor_mark, session.id, session.event_count, last_event, end_label
-        )
-        .map_err(|err| err.to_string())?;
+        ));
 
         let commits = load_recent_commits(&session.id, 6)?;
         for commit in commits {
-            writeln!(
-                stdout,
-                "    {}  {}",
+            output.push_str(&format!(
+                "    {}  {}\n",
                 short_hash(&commit.commit),
                 commit.summary
-            )
-            .map_err(|err| err.to_string())?;
+            ));
         }
     }
 
     if let Some(message) = status_msg {
-        writeln!(stdout).map_err(|err| err.to_string())?;
-        writeln!(stdout, "{message}").map_err(|err| err.to_string())?;
+        output.push('\n');
+        output.push_str(message);
+        output.push('\n');
     }
 
-    stdout.flush().map_err(|err| err.to_string())?;
-    Ok(())
+    Ok(output)
 }
 
 fn load_recent_commits(session_id: &str, limit: usize) -> Result<Vec<SessionCommit>, String> {
@@ -146,6 +147,8 @@ struct RawModeGuard;
 impl RawModeGuard {
     fn new() -> Result<Self, String> {
         terminal::enable_raw_mode().map_err(|err| err.to_string())?;
+        let mut stdout = io::stdout();
+        let _ = execute!(stdout, cursor::Hide);
         Ok(Self)
     }
 }

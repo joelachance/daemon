@@ -89,6 +89,7 @@ pub fn run_daemon(start_stdin: bool) -> Result<(), String> {
     if start_stdin {
         start_stdin_thread(registry.clone());
     }
+    check_auto_push_on_startup();
     start_cursor_poll_thread();
     start_claude_poll_thread();
     start_opencode_poll_thread();
@@ -367,6 +368,91 @@ fn mark_auto_push_attempted(
         }
         session.auto_push_attempted = true;
     }
+}
+
+fn check_auto_push_on_startup() {
+    if parse_bool_env("GG_AUTO_PUSH") == Some(false) {
+        return;
+    }
+
+    let timeout_secs = env::var("GG_AUTO_PUSH_AFTER_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(3600);
+
+    let root = match git::repo_root() {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+
+    let sessions = match store::list_sessions() {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    if !should_auto_push_on_startup(&sessions, now, timeout_secs) {
+        return;
+    }
+
+    if let Err(err) = auto_push_repo(&root) {
+        eprintln!("daemon: auto push error: {err}");
+    }
+}
+
+fn should_auto_push_on_startup(
+    sessions: &[store::SessionInfo],
+    now: i64,
+    timeout_secs: i64,
+) -> bool {
+    for session in sessions {
+        if session.end_status.is_none() {
+            continue;
+        }
+        let last_event = match session.last_event.as_deref() {
+            Some(value) => value,
+            None => continue,
+        };
+        let ts = match parse_event_timestamp(last_event) {
+            Some(value) => value,
+            None => continue,
+        };
+        if now - ts >= timeout_secs {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_event_timestamp(value: &str) -> Option<i64> {
+    if let Ok(parsed) = OffsetDateTime::parse(value, &Rfc3339) {
+        return Some(parsed.unix_timestamp());
+    }
+
+    let mut trimmed = value.trim().to_string();
+    if let Some(stripped) = trimmed.strip_suffix(".json") {
+        trimmed = stripped.to_string();
+    }
+
+    if let Some((date, rest)) = trimmed.split_once('T') {
+        let mut rest_value = rest.to_string();
+        let mut replaced = String::new();
+        let mut hyphen_count = 0usize;
+        for ch in rest_value.chars() {
+            if ch == '-' && hyphen_count < 2 {
+                replaced.push(':');
+                hyphen_count += 1;
+            } else {
+                replaced.push(ch);
+            }
+        }
+        let candidate = format!("{date}T{replaced}");
+        if let Ok(parsed) = OffsetDateTime::parse(&candidate, &Rfc3339) {
+            return Some(parsed.unix_timestamp());
+        }
+    }
+
+    None
 }
 
 fn start_stdin_thread(registry: Arc<Mutex<SessionRegistry>>) {

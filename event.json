@@ -1,35 +1,35 @@
 {
   "schema": 1,
   "session_id": "ses_362b82890ffexq0uOXw3mRkISQ",
-  "summary": "OpenCode ingestion",
+  "summary": "go",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:01.172996Z",
+  "timestamp": "2026-02-27T05:19:01.655507Z",
   "tokens": {
-    "input": 1110,
-    "output": 1682,
-    "total": 32872
+    "input": 467,
+    "output": 380,
+    "total": 55759
   },
   "tool_tokens": [],
   "meta": {
-    "agent": "plan",
+    "agent": "build",
     "finish": "stop",
-    "message_id": "msg_c9d483f42002AMvBmRrsXlJmXh",
-    "mode": "plan",
+    "message_id": "msg_c9d5d8d0b002l8d9xI4Zle6RlN",
+    "mode": "build",
     "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d487c95001TZN8ZcAsi1v11O",
-    "part_time_created": 1772165299349,
+    "part_id": "prt_c9d5da339001s0EN20FVMxmdE3",
+    "part_time_created": 1772166685497,
     "path": {
       "cwd": "/Users/joe/git/daemon",
       "root": "/Users/joe/git/daemon"
     },
     "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
     "prompt": {
-      "text": "OpenCode ingestion\nYou are working in READ-ONLY mode. Do NOT edit, create, or delete files. You may only read files and report findings.\nGoal: Implement Step 5 — OpenCode session harvesting.\nRequirements:\n- Identify OpenCode storage location(s) and schema.\n- Map sessions to repo.\n- Emit events per assistant response.\n- No inactivity end detection.\nWhat to do:\n1) Inspect existing placeholders in schemas/opencode.md.\n2) Search for any existing OpenCode integration stubs.\n3) Propose discovery steps for local storage (paths, file types).\n4) Draft a concrete change plan:\n   - new module file\n   - event extraction logic\n   - schema documentation updates\nDeliverable:\n- A short report listing:\n  - files to change/add\n  - proposed storage locations to test\n  - event extraction approach\nConstraints:\n- No file edits\n- No running git commands\n- Only read/inspect code\nRepository root: /Users/joe/git/daemon "
+      "text": "go"
     },
     "provider_id": "openai",
     "response": {
-      "text": "Found only a placeholder for OpenCode and no existing integration stubs. Cursor harvesting is the closest pattern to follow (`src/cursor.rs`, `src/daemon.rs`). Below is a concrete, read‑only plan tailored to Step 5.\n\n**Findings**\n- Placeholder: `schemas/opencode.md` (TODO list only).\n- No OpenCode code stubs found outside that placeholder.\n- Existing harvesting pattern: Cursor polling in `src/cursor.rs` + daemon thread in `src/daemon.rs`.\n\n**Files to change/add (plan)**\n- Add: `src/opencode.rs` (new module for storage discovery + event extraction).\n- Update: `src/daemon.rs` (start OpenCode poll thread; call opencode module).\n- Update: `src/main.rs` (add `mod opencode;`).\n- Update: `schemas/opencode.md` (document storage locations, schema, repo mapping, event extraction).\n- Optional: `README.md` (mention OpenCode harvesting if user wants it documented).\n\n**Proposed storage locations to test (macOS‑first, then cross‑platform)**\n1) `~/.config/opencode/`  \n   - Look for `sessions/`, `events/`, `state.json`, `*.jsonl`, `*.sqlite`.\n2) `~/Library/Application Support/OpenCode/`  \n   - Look for `state.db`, `sessions.db`, `logs/`, `events.jsonl`.\n3) `~/Library/Application Support/opencode/`  \n   - Same patterns as above.\n4) `~/Library/Logs/OpenCode/`  \n   - Possible `*.log` or `*.jsonl` event streams.\n5) `~/.local/share/opencode/` (Linux parity)  \n6) Env overrides: `OPENCODE_HOME`, `OPENCODE_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`.\n\n**Event extraction approach (concrete plan)**\n- **Discovery pass** (read‑only):\n  - Enumerate candidate directories; detect files matching `*.sqlite`, `*.db`, `*.json`, `*.jsonl`.\n  - If SQLite: inspect table list; look for session/message tables and JSON blobs.\n  - If JSON/JSONL: parse line‑delimited events; identify message boundaries.\n- **Session → repo mapping**:\n  - Prefer explicit `cwd`, `repo`, or `workspace` fields in events/session metadata.\n  - Fallback: parse tool call `cwd` / `path` fields; map via `git::repo_root_from`.\n  - Track sessions per repo path; ignore sessions with no repo mapping.\n- **Emit events per assistant response**:\n  - For each assistant message, build summary (first line or truncate to 72 chars).\n  - Use `daemon::send_event` with:\n    - `session_id` = OpenCode session id\n    - `summary` = assistant response summary\n    - `tokens` = if available in event metadata\n    - `tool_tokens` = if tool usage is logged\n    - `meta` = raw OpenCode event metadata (source: \"opencode\", message ids, model, timestamps)\n    - `cwd_override` = repo root if known\n- **No inactivity end detection**:\n  - Do not infer session end by idle time.\n  - Only emit events for explicit assistant responses; skip any “session end” heuristics.\n\nIf you want me to proceed to the next step, I can inspect likely storage paths on this machine (read‑only) and report exact files/schemas."
+      "text": "OpenCode harvesting is now wired into the daemon with a new module that reads the local SQLite store, maps sessions to the repo via `session.directory`/`project.worktree`, and emits a gg event per assistant text part (no inactivity end detection). The schema doc is updated with the exact tables and extraction logic.\n\nChanged files:\n- `src/opencode.rs` (new OpenCode poller + state tracking)\n- `src/daemon.rs` (start OpenCode poll thread)\n- `src/main.rs` (register module)\n- `schemas/opencode.md` (document storage, schema, mapping, extraction)\n\nKey details implemented:\n- Storage: `/Users/joe/.local/share/opencode/opencode.db` (override via `GG_OPENCODE_DB` or `OPENCODE_DB`)\n- Event extraction: join `session`/`project`/`message`/`part`, filter `message.role == assistant` and `part.type == text`, emit per response\n- State: `.git/gg/opencode.json` tracks last seen part time per session\n- Polling controls: `GG_OPENCODE_POLL` (off to disable), `GG_OPENCODE_POLL_SECS`, `GG_OPENCODE_REPO`\n\nIf you want to validate end‑to‑end, I can run:\n1) `cargo build`\n2) Start daemon and confirm new events appear from recent OpenCode sessions"
     },
     "role": "assistant",
     "session_directory": "/Users/joe/git/daemon",

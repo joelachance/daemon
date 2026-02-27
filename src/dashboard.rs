@@ -105,8 +105,7 @@ fn render(
             cursor_char.with(Color::DarkGrey)
         };
         let end_label = match session.end_status {
-            Some(EndStatus::Explicit) => "ended".with(Color::Red).bold(),
-            Some(EndStatus::Soft) => "soft end".with(Color::Yellow),
+            Some(EndStatus::Explicit) | Some(EndStatus::Soft) => "ended".with(Color::Red).bold(),
             None => "active".with(Color::Green),
         };
         let last_event = session
@@ -114,8 +113,7 @@ fn render(
             .as_ref()
             .map(String::as_str)
             .unwrap_or("unknown");
-        let header_line =
-            session_header_line(&session.id, session.event_count, width.saturating_sub(2));
+        let header_line = session_header_line(session, width.saturating_sub(2));
         write_line(
             stdout,
             format!("{} {}", cursor_mark, header_line.with(Color::White)),
@@ -164,8 +162,7 @@ fn build_frame_key(
 
     for (idx, session) in sessions.iter().enumerate() {
         let cursor_mark = if idx == cursor_pos { ">" } else { " " };
-        let header_line =
-            session_header_line(&session.id, session.event_count, width.saturating_sub(2));
+        let header_line = session_header_line(session, width.saturating_sub(2));
         output.push_str(&format!("{} {}", cursor_mark, header_line));
         output.push('\n');
         output.push_str(&session_status_line(
@@ -178,8 +175,7 @@ fn build_frame_key(
         ));
         output.push('\n');
         let end_label = match session.end_status {
-            Some(EndStatus::Explicit) => "ended",
-            Some(EndStatus::Soft) => "soft end",
+            Some(EndStatus::Explicit) | Some(EndStatus::Soft) => "ended",
             None => "active",
         };
         output.push_str(end_label);
@@ -213,9 +209,30 @@ fn short_hash(value: &str) -> String {
     value.chars().take(7).collect::<String>()
 }
 
-fn session_header_line(session_id: &str, count: usize, width: usize) -> String {
-    let line = format!("{}  {} events", session_id, count);
+fn session_header_line(session: &SessionInfo, width: usize) -> String {
+    let name = session
+        .display_name
+        .as_deref()
+        .unwrap_or("untitled session");
+    let source = source_label(session.source.as_deref());
+    let line = if source.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} - {source}")
+    };
     truncate_to_width(&line, width)
+}
+
+fn source_label(source: Option<&str>) -> &'static str {
+    match source.unwrap_or("") {
+        "cursor" => "Cursor",
+        "opencode" => "OpenCode",
+        "claude" => "Claude",
+        "stdin" => "CLI",
+        "daemon" => "Daemon",
+        "" => "Unknown",
+        _ => "Unknown",
+    }
 }
 
 fn session_status_line(last_event: &str, width: usize) -> String {

@@ -1,5 +1,6 @@
 use crate::git;
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,8 @@ pub struct SessionInfo {
     pub last_event: Option<String>,
     pub event_count: usize,
     pub end_status: Option<EndStatus>,
+    pub display_name: Option<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,13 +32,7 @@ struct SessionEventRecord {
     commit: Option<String>,
     summary: Option<String>,
     timestamp: Option<String>,
-    meta: Option<SessionEventMeta>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionEventMeta {
-    end: Option<bool>,
-    soft_end: Option<bool>,
+    meta: Option<Value>,
 }
 
 pub fn write_event(root: &str, session_id: &str, payload: &str) -> Result<(), String> {
@@ -67,12 +64,15 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>, String> {
         if session_id.trim().is_empty() {
             continue;
         }
-        let (event_count, last_event, end_status) = session_event_stats(&root, &session_id)?;
+        let (event_count, last_event, end_status, display_name, source) =
+            session_event_stats(&root, &session_id)?;
         sessions.push(SessionInfo {
             id: session_id,
             last_event,
             event_count,
             end_status,
+            display_name,
+            source,
         });
     }
 
@@ -90,10 +90,10 @@ pub fn session_ended(session_id: &str) -> Result<bool, String> {
     let payload = fs::read_to_string(last).map_err(|err| err.to_string())?;
     let record: SessionEventRecord =
         serde_json::from_str(&payload).map_err(|err| err.to_string())?;
-    Ok(record
-        .meta
-        .map(|meta| meta.end.unwrap_or(false) || meta.soft_end.unwrap_or(false))
-        .unwrap_or(false))
+    Ok(matches!(
+        extract_end_status(record.meta.as_ref()),
+        Some(EndStatus::Explicit | EndStatus::Soft)
+    ))
 }
 
 pub fn session_end_status(session_id: &str) -> Result<Option<EndStatus>, String> {
@@ -106,17 +106,7 @@ pub fn session_end_status(session_id: &str) -> Result<Option<EndStatus>, String>
     let payload = fs::read_to_string(last).map_err(|err| err.to_string())?;
     let record: SessionEventRecord =
         serde_json::from_str(&payload).map_err(|err| err.to_string())?;
-    let meta = match record.meta {
-        Some(meta) => meta,
-        None => return Ok(None),
-    };
-    if meta.end.unwrap_or(false) {
-        return Ok(Some(EndStatus::Explicit));
-    }
-    if meta.soft_end.unwrap_or(false) {
-        return Ok(Some(EndStatus::Soft));
-    }
-    Ok(None)
+    Ok(extract_end_status(record.meta.as_ref()))
 }
 
 pub fn list_session_commits(session_id: &str) -> Result<Vec<SessionCommit>, String> {
@@ -167,32 +157,35 @@ fn session_events_dir(root: &str, session_id: &str) -> Result<PathBuf, String> {
 fn session_event_stats(
     root: &str,
     session_id: &str,
-) -> Result<(usize, Option<String>, Option<EndStatus>), String> {
+) -> Result<
+    (
+        usize,
+        Option<String>,
+        Option<EndStatus>,
+        Option<String>,
+        Option<String>,
+    ),
+    String,
+> {
     let events = list_event_files(root, session_id)?;
     let event_count = events.len();
-    let (last_event, end_status) = match events.last() {
+    let (last_event, end_status, display_name, source) = match events.last() {
         Some(path) => {
             let payload = fs::read_to_string(path).map_err(|err| err.to_string())?;
             let record: SessionEventRecord =
                 serde_json::from_str(&payload).map_err(|err| err.to_string())?;
-            let end_status = record.meta.and_then(|meta| {
-                if meta.end.unwrap_or(false) {
-                    Some(EndStatus::Explicit)
-                } else if meta.soft_end.unwrap_or(false) {
-                    Some(EndStatus::Soft)
-                } else {
-                    None
-                }
-            });
+            let end_status = extract_end_status(record.meta.as_ref());
+            let display_name = extract_session_name(record.meta.as_ref());
+            let source = extract_source(record.meta.as_ref());
             let timestamp = record.timestamp.or_else(|| {
                 path.file_name()
                     .map(|name| name.to_string_lossy().to_string())
             });
-            (timestamp, end_status)
+            (timestamp, end_status, display_name, source)
         }
-        None => (None, None),
+        None => (None, None, None, None),
     };
-    Ok((event_count, last_event, end_status))
+    Ok((event_count, last_event, end_status, display_name, source))
 }
 
 fn list_event_files(root: &str, session_id: &str) -> Result<Vec<PathBuf>, String> {
@@ -233,4 +226,78 @@ fn event_filename(payload: &str) -> Option<String> {
 
 fn now_ts() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
+}
+
+fn extract_end_status(meta: Option<&Value>) -> Option<EndStatus> {
+    let meta = meta?;
+    if meta
+        .get("end")
+        .and_then(|val| val.as_bool())
+        .unwrap_or(false)
+    {
+        return Some(EndStatus::Explicit);
+    }
+    if meta
+        .get("soft_end")
+        .and_then(|val| val.as_bool())
+        .unwrap_or(false)
+    {
+        return Some(EndStatus::Soft);
+    }
+    None
+}
+
+fn extract_source(meta: Option<&Value>) -> Option<String> {
+    meta.and_then(|value| value.get("source"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn extract_session_name(meta: Option<&Value>) -> Option<String> {
+    let meta = meta?;
+    for key in ["name", "session_title", "title", "subtitle", "slug"] {
+        if let Some(value) = meta.get(key).and_then(|value| value.as_str()) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    if let Some(dir) = meta
+        .get("session_directory")
+        .and_then(|value| value.as_str())
+    {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            if let Some(name) = Path::new(trimmed).file_name().and_then(|val| val.to_str()) {
+                let name_trimmed = name.trim();
+                if !name_trimmed.is_empty() {
+                    return Some(name_trimmed.to_string());
+                }
+            }
+        }
+    }
+    if let Some(dir) = meta.get("path").and_then(|value| value.as_str()) {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            if let Some(name) = Path::new(trimmed).file_name().and_then(|val| val.to_str()) {
+                let name_trimmed = name.trim();
+                if !name_trimmed.is_empty() {
+                    return Some(name_trimmed.to_string());
+                }
+            }
+        }
+    }
+    if let Some(dir) = meta.get("cwd").and_then(|value| value.as_str()) {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            if let Some(name) = Path::new(trimmed).file_name().and_then(|val| val.to_str()) {
+                let name_trimmed = name.trim();
+                if !name_trimmed.is_empty() {
+                    return Some(name_trimmed.to_string());
+                }
+            }
+        }
+    }
+    None
 }

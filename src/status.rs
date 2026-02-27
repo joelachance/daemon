@@ -509,17 +509,14 @@ fn render_sessions(
             .map(String::as_str)
             .unwrap_or("unknown");
         let end_label = match session.end_status {
-            Some(EndStatus::Explicit) => " (ended)",
-            Some(EndStatus::Soft) => " (soft end)",
+            Some(EndStatus::Explicit) | Some(EndStatus::Soft) => " (ended)",
             None => "",
         };
+        let header = session_header_line(session);
         writeln!(
             stdout,
-            "{} {}  {} events  last {}",
-            cursor_mark,
-            session.id,
-            session.event_count,
-            format!("{last_event}{end_label}")
+            "{} {}  last {}{}",
+            cursor_mark, header, last_event, end_label
         )
         .map_err(|err| err.to_string())?;
     }
@@ -538,11 +535,10 @@ fn render_active(
     status: &Option<String>,
 ) -> Result<(), String> {
     writeln!(stdout, "gg status - active session").map_err(|err| err.to_string())?;
-    writeln!(stdout, "{}", session.id).map_err(|err| err.to_string())?;
+    writeln!(stdout, "{}", session_header_line(session)).map_err(|err| err.to_string())?;
     writeln!(
         stdout,
-        "events: {}  last: {}",
-        session.event_count,
+        "last: {}",
         session
             .last_event
             .as_ref()
@@ -571,11 +567,10 @@ fn render_commits(
     status: &Option<String>,
 ) -> Result<(), String> {
     writeln!(stdout, "gg status - review").map_err(|err| err.to_string())?;
-    writeln!(stdout, "session: {}", session.id).map_err(|err| err.to_string())?;
+    writeln!(stdout, "session: {}", session_header_line(session)).map_err(|err| err.to_string())?;
     if let Ok(Some(status)) = store::session_end_status(&session.id) {
         let label = match status {
-            EndStatus::Explicit => "ended",
-            EndStatus::Soft => "soft end",
+            EndStatus::Explicit | EndStatus::Soft => "ended",
         };
         writeln!(stdout, "status: {label}").map_err(|err| err.to_string())?;
     }
@@ -618,6 +613,31 @@ fn render_commits(
     }
 
     Ok(())
+}
+
+fn session_header_line(session: &SessionInfo) -> String {
+    let name = session
+        .display_name
+        .as_deref()
+        .unwrap_or("untitled session");
+    let source = source_label(session.source.as_deref());
+    if source.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} - {source}")
+    }
+}
+
+fn source_label(source: Option<&str>) -> &'static str {
+    match source.unwrap_or("") {
+        "cursor" => "Cursor",
+        "opencode" => "OpenCode",
+        "claude" => "Claude",
+        "stdin" => "CLI",
+        "daemon" => "Daemon",
+        "" => "Unknown",
+        _ => "Unknown",
+    }
 }
 
 struct RawModeGuard;

@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "session_id": "ses_362d71707ffe58WqCtCxv95mea",
+  "summary": "CLI contract + command surface for the gg tool.",
+  "commit": null,
+  "paths": [],
+  "timestamp": "2026-02-27T05:19:00.266928Z",
+  "tokens": {
+    "input": 6570,
+    "output": 812,
+    "total": 21206
+  },
+  "tool_tokens": [],
+  "meta": {
+    "agent": "build",
+    "finish": "stop",
+    "message_id": "msg_c9d28f6e3001LtMlAPVkrwnqWm",
+    "mode": "build",
+    "model_id": "gpt-5.2-codex",
+    "part_id": "prt_c9d28fd68001XROpE6qVjOo5Wq",
+    "part_time_created": 1772163235177,
+    "path": {
+      "cwd": "/Users/joe/git/daemon",
+      "root": "/Users/joe/git/daemon"
+    },
+    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
+    "prompt": {
+      "text": "CLI contract + command surface for the gg tool.\nRequirements:\n- Remove any --daemon flag behavior.\n- Remove gg session ... commands (event/summary/list/etc).\n- Only supported commands:\n  - gg (no args): prints intro banner + ensures daemon running + exits.\n  - gg status: enters the review UI (placeholder call is ok for now).\n  - gg \"<natural language prompt>\": routes to prompt mode.\n- Any unknown args should be treated as a natural language prompt (quotes optional).\n- Update help/usage text to match new surface area.\nWhat to do:\n1) Inspect the current CLI command routing in src/main.rs and src/cli.rs.\n2) Identify which code paths implement --daemon, gg session ..., and extra commands.\n3) Draft a concrete change plan:\n   - which functions to delete or refactor\n   - updated command routing flow\n   - updated help text\n   - any new/renamed functions needed\n4) Return a concise, file-by-file checklist of edits required (no edits performed).\nDeliverable:\n- A short report listing:\n  - files to change\n  - specific functions/blocks to alter\n  - the intended new CLI flow\n  - updated help text outline\nConstraints:\n- No file edits\n- No running git commands\n- Only read/inspect code\nRepository root: /Users/joe/git/daemon "
+    },
+    "provider_id": "openai",
+    "response": {
+      "text": "Here’s a concise, file-by-file change plan based on `src/main.rs` and `src/cli.rs`. No edits performed.\n\n**Files to change**\n- `src/main.rs`\n- `src/cli.rs`\n\n**Specific functions/blocks to alter**\n\n`src/main.rs`\n- `main()`:\n  - Remove the `--daemon` / `GG_DAEMON` branch that calls `daemon::run_daemon()`.\n  - Remove the `cli::is_tool()` branch that routes to `daemon::run_tool()`.\n  - Remove or refactor the `cli::is_command()` branch to only support the new command surface.\n  - Update the “no args” behavior to “print intro banner + ensure daemon running + exit” instead of `cli::print_help()`.\n  - Replace the final “prompt” fallback (`println!(\"non-implemented\")`) with the new prompt routing; also apply “unknown args => prompt mode”.\n\n`src/cli.rs`\n- Command definitions:\n  - Update `COMMANDS` to only include `status` and `help` (if `help` is still used as an explicit command), or remove `help` command and rely on flags.\n  - Remove `TOOLS` list and `is_tool()` if tools no longer exist.\n- `run_command()`:\n  - Remove branches for `daemon`, `init`, `log`, `commit`, `diff`, `show`, `blame`, `open`, `summary`, `sessions`, `session`.\n  - Keep `status`, but switch it from `run_git_passthrough(\"status\", args)` to the placeholder “enter review UI” call.\n- Delete or orphaned functions to remove:\n  - `run_daemon_command`\n  - `run_init_command` (and its helper parsing logic if unused elsewhere)\n  - `run_git_passthrough` if only used for removed commands\n  - `run_session_command`\n  - `run_session_event_command`\n  - `run_session_summary_command`\n  - `run_sessions_command`\n  - `parse_u64`, `build_tokens`, `parse_tool_token`, `default_flag`, `parse_bool` if no longer used after session/daemon removal\n- `print_help()`:\n  - Rewrite usage and examples to match the new contract.\n\n**Intended new CLI flow**\n\n1) `gg` (no args):\n   - Print intro banner (can be a new `cli::print_intro()` or reusing `print_help()` if you want the banner there).\n   - Ensure daemon is running (call `daemon::ensure_running()` or similar; if it doesn’t exist, create a function in `daemon`).\n   - Exit.\n\n2) `gg status`:\n   - Enter review UI. For now, call placeholder function (e.g., `cli::run_status_ui()` or a stub in `daemon`/`session`).\n\n3) `gg \"<natural language prompt>\"`:\n   - Route to prompt mode (new function, placeholder ok).\n\n4) Unknown args (including flags) → treated as prompt:\n   - Any arg not recognized as `status` or help flag should be joined into the prompt and routed to prompt mode (quotes optional).\n\n**Updated help text outline**\n\n- Title: `gg - AI-native Git/JJ porcelain`\n- Usage:\n  - `gg`\n  - `gg status`\n  - `gg \"<prompt>\"`\n- Description:\n  - `gg` starts/ensures daemon and prints banner\n  - `gg status` opens review UI\n  - Any other args are treated as a prompt\n- Examples:\n  - `gg`\n  - `gg status`\n  - `gg \"summarize recent changes\"`\n\nIf you want, I can also scan other files (e.g., `src/daemon.rs`, `src/session.rs`) to identify now-dead APIs or confirm the best placeholder hook for review UI/prompt mode."
+    },
+    "role": "assistant",
+    "session_directory": "/Users/joe/git/daemon",
+    "session_id": "ses_362d71707ffe58WqCtCxv95mea",
+    "session_title": "CLI surface overhaul for gg tool command routing",
+    "source": "opencode"
+  }
+}

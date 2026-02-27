@@ -1,5 +1,6 @@
 use crate::daemon;
-use crate::git::{self, SessionCommit, SessionInfo};
+use crate::git;
+use crate::store::{self, EndStatus, SessionCommit, SessionInfo};
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
@@ -35,7 +36,7 @@ enum View {
 
 pub fn run_status_ui() -> Result<(), String> {
     daemon::ensure_daemon_running()?;
-    let sessions = git::list_sessions()?;
+    let sessions = store::list_sessions()?;
 
     if sessions.is_empty() {
         println!("gg status: no sessions found");
@@ -75,8 +76,8 @@ pub fn run_status_ui() -> Result<(), String> {
                     }
                     KeyCode::Enter => {
                         if let Some(session) = sessions.get(*cursor).cloned() {
-                            match git::session_ended(&session.id) {
-                                Ok(true) => match git::list_session_commits(&session.id) {
+                            match store::session_ended(&session.id) {
+                                Ok(true) => match store::list_session_commits(&session.id) {
                                     Ok(commits) => {
                                         if commits.is_empty() {
                                             *status = Some("no commits for session".to_string());
@@ -111,7 +112,7 @@ pub fn run_status_ui() -> Result<(), String> {
                 } => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     _ => {
-                        let sessions = git::list_sessions()?;
+                        let sessions = store::list_sessions()?;
                         view = View::Sessions {
                             sessions,
                             cursor: 0,
@@ -190,6 +191,111 @@ pub fn run_status_ui() -> Result<(), String> {
                         }
                         _ => {}
                     }
+                }
+            }
+        }
+    }
+
+    drop(_guard);
+    if let Some(message) = exit_message {
+        println!("{message}");
+    }
+    Ok(())
+}
+
+pub fn run_review_for_session(session_id: &str) -> Result<(), String> {
+    daemon::ensure_daemon_running()?;
+    let ended = store::session_end_status(session_id)?;
+    if ended.is_none() {
+        return Err("session still active".to_string());
+    }
+    let sessions = store::list_sessions()?;
+    let session = sessions
+        .into_iter()
+        .find(|item| item.id == session_id)
+        .ok_or_else(|| "session not found".to_string())?;
+    let commits = store::list_session_commits(&session.id)?;
+    if commits.is_empty() {
+        return Err("no commits for session".to_string());
+    }
+
+    let mut stdout = io::stdout();
+    let _guard = RawModeGuard::new()?;
+    let mut view = View::Commits {
+        session,
+        selected: vec![false; commits.len()],
+        commits,
+        cursor: 0,
+        pending_action: None,
+        status: None,
+    };
+    let mut exit_message: Option<String> = None;
+
+    loop {
+        render_view(&mut stdout, &view)?;
+        let event = event::read().map_err(|err| err.to_string())?;
+        if let Event::Key(key) = event {
+            if let View::Commits {
+                ref session,
+                ref mut commits,
+                ref mut selected,
+                ref mut cursor,
+                ref mut pending_action,
+                ref mut status,
+            } = view
+            {
+                let commit_len = commits.len();
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if *cursor > 0 {
+                            *cursor -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if *cursor + 1 < commit_len {
+                            *cursor += 1;
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        if let Some(slot) = selected.get_mut(*cursor) {
+                            *slot = !*slot;
+                            normalize_selection(selected);
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        *pending_action = Some(Action::Squash);
+                    }
+                    KeyCode::Char('a') => {
+                        *pending_action = Some(Action::Amend);
+                    }
+                    KeyCode::Char('u') => {
+                        *pending_action = Some(Action::Undo);
+                    }
+                    KeyCode::Enter => {
+                        if pending_action.is_none() {
+                            exit_message = Some("accepted".to_string());
+                            break;
+                        }
+
+                        if !selected.iter().any(|value| *value) {
+                            if let Some(slot) = selected.get_mut(*cursor) {
+                                *slot = true;
+                            }
+                        }
+                        normalize_selection(selected);
+                        let action = pending_action.unwrap_or(Action::Squash);
+                        match apply_action(action, session, commits, selected) {
+                            Ok(message) => {
+                                exit_message = Some(message);
+                                break;
+                            }
+                            Err(err) => {
+                                *status = Some(err);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -402,10 +508,18 @@ fn render_sessions(
             .as_ref()
             .map(String::as_str)
             .unwrap_or("unknown");
+        let end_label = match session.end_status {
+            Some(EndStatus::Explicit) => " (ended)",
+            Some(EndStatus::Soft) => " (soft end)",
+            None => "",
+        };
         writeln!(
             stdout,
             "{} {}  {} events  last {}",
-            cursor_mark, session.id, session.event_count, last_event
+            cursor_mark,
+            session.id,
+            session.event_count,
+            format!("{last_event}{end_label}")
         )
         .map_err(|err| err.to_string())?;
     }
@@ -458,6 +572,13 @@ fn render_commits(
 ) -> Result<(), String> {
     writeln!(stdout, "gg status - review").map_err(|err| err.to_string())?;
     writeln!(stdout, "session: {}", session.id).map_err(|err| err.to_string())?;
+    if let Ok(Some(status)) = store::session_end_status(&session.id) {
+        let label = match status {
+            EndStatus::Explicit => "ended",
+            EndStatus::Soft => "soft end",
+        };
+        writeln!(stdout, "status: {label}").map_err(|err| err.to_string())?;
+    }
     writeln!(
         stdout,
         "arrows/kj move  space select  s squash  a amend  u undo  enter accept as-is  q quit"

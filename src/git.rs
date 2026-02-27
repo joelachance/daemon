@@ -1,31 +1,13 @@
 use ignore::gitignore::GitignoreBuilder;
 use ignore::WalkBuilder;
-use serde::Deserialize;
-use std::collections::HashSet;
-use std::env;
 use std::ffi::OsStr;
-use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 #[derive(Debug, Default, Clone)]
 pub struct GitOutput {
     pub stdout: String,
     pub stderr: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionCommit {
-    pub commit: String,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionInfo {
-    pub id: String,
-    pub last_event: Option<String>,
-    pub event_count: usize,
 }
 
 #[allow(dead_code)]
@@ -284,6 +266,41 @@ pub fn commit_in_root(
     Ok((Some(sha.trim().to_string()), output))
 }
 
+pub fn commit_in_root_with_footer(
+    root: &str,
+    subject: &str,
+    footer: Option<&str>,
+    trailers: &[(String, String)],
+) -> Result<(Option<String>, GitOutput), String> {
+    if staged_is_clean(root)? {
+        return Ok((None, GitOutput::default()));
+    }
+
+    let mut extra_lines = Vec::new();
+    if let Some(value) = footer {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            extra_lines.push(trimmed.to_string());
+        }
+    }
+    for (key, value) in trailers {
+        extra_lines.push(format!("{key}: {value}"));
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).arg("commit").arg("-m").arg(subject);
+
+    if !extra_lines.is_empty() {
+        cmd.arg("-m").arg(extra_lines.join("\n"));
+    }
+
+    let output = run_status_output(cmd)?;
+    let mut rev_cmd = Command::new("git");
+    rev_cmd.arg("-C").arg(root).arg("rev-parse").arg("HEAD");
+    let sha = run_stdout(rev_cmd)?;
+    Ok((Some(sha.trim().to_string()), output))
+}
+
 pub fn commit_subject(commit: &str) -> Result<String, String> {
     let root = repo_root()?;
     let output = Command::new("git")
@@ -303,6 +320,28 @@ pub fn commit_subject(commit: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+pub fn branch_name() -> Result<Option<String>, String> {
+    let root = repo_root()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err("git rev-parse --abbrev-ref failed".to_string());
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() || name == "HEAD" {
+        Ok(None)
+    } else {
+        Ok(Some(name))
+    }
+}
+
 pub fn commit_parent(commit: &str) -> Result<Option<String>, String> {
     let root = repo_root()?;
     let output = Command::new("git")
@@ -320,159 +359,6 @@ pub fn commit_parent(commit: &str) -> Result<Option<String>, String> {
     } else {
         Ok(None)
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionEventRecord {
-    commit: Option<String>,
-    summary: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionEventMeta {
-    end: Option<bool>,
-    soft_end: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionEventPayload {
-    meta: Option<SessionEventMeta>,
-}
-
-pub fn list_session_commits(session_id: &str) -> Result<Vec<SessionCommit>, String> {
-    let root = repo_root()?;
-    let ref_name = format!("refs/gg/sessions/{session_id}");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .arg("rev-list")
-        .arg("--reverse")
-        .arg(&ref_name)
-        .output()
-        .map_err(|err| err.to_string())?;
-
-    if !output.status.success() {
-        return Err(format!("session not found: {session_id}"));
-    }
-
-    let mut seen = HashSet::new();
-    let mut commits = Vec::new();
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let event_commit = line.trim();
-        if event_commit.is_empty() {
-            continue;
-        }
-
-        let payload = read_commit_file(&root, event_commit, "event.json")?;
-        let record: SessionEventRecord =
-            serde_json::from_str(&payload).map_err(|err| err.to_string())?;
-
-        let commit_hash = match record.commit {
-            Some(value) if !value.trim().is_empty() => value.trim().to_string(),
-            _ => continue,
-        };
-
-        if !seen.insert(commit_hash.clone()) {
-            continue;
-        }
-
-        let summary = match commit_subject(&commit_hash) {
-            Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
-            _ => record
-                .summary
-                .unwrap_or_else(|| "commit".to_string())
-                .trim()
-                .to_string(),
-        };
-
-        commits.push(SessionCommit {
-            commit: commit_hash,
-            summary,
-        });
-    }
-
-    Ok(commits)
-}
-
-pub fn session_ended(session_id: &str) -> Result<bool, String> {
-    let root = repo_root()?;
-    let ref_name = format!("refs/gg/sessions/{session_id}");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .arg("rev-list")
-        .arg("-1")
-        .arg(&ref_name)
-        .output()
-        .map_err(|err| err.to_string())?;
-
-    if !output.status.success() {
-        return Err(format!("session not found: {session_id}"));
-    }
-
-    let event_commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if event_commit.is_empty() {
-        return Ok(false);
-    }
-
-    let payload = read_commit_file(&root, &event_commit, "event.json")?;
-    let record: SessionEventPayload =
-        serde_json::from_str(&payload).map_err(|err| err.to_string())?;
-    Ok(record
-        .meta
-        .map(|meta| meta.end.unwrap_or(false) || meta.soft_end.unwrap_or(false))
-        .unwrap_or(false))
-}
-
-pub fn list_sessions() -> Result<Vec<SessionInfo>, String> {
-    let root = repo_root()?;
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .arg("for-each-ref")
-        .arg("--sort=-committerdate")
-        .arg("--format=%(refname:strip=3)\t%(committerdate:iso8601-strict)")
-        .arg("refs/gg/sessions")
-        .output()
-        .map_err(|err| err.to_string())?;
-
-    if !output.status.success() {
-        return Err("git for-each-ref failed".to_string());
-    }
-
-    let mut sessions = Vec::new();
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut parts = trimmed.splitn(2, '\t');
-        let id = match parts.next() {
-            Some(value) if !value.trim().is_empty() => value.trim().to_string(),
-            _ => continue,
-        };
-        let last_event = parts.next().map(|value| value.trim().to_string());
-
-        let mut count_cmd = Command::new("git");
-        count_cmd
-            .arg("-C")
-            .arg(&root)
-            .arg("rev-list")
-            .arg("--count")
-            .arg(format!("refs/gg/sessions/{id}"));
-        let count_output = run_stdout(count_cmd)?;
-        let event_count = count_output.trim().parse::<usize>().unwrap_or(0);
-
-        sessions.push(SessionInfo {
-            id,
-            last_event,
-            event_count,
-        });
-    }
-
-    Ok(sessions)
 }
 
 pub fn push() -> Result<(), String> {
@@ -524,120 +410,6 @@ pub fn commit_with_message(summary: &str, amend: bool) -> Result<GitOutput, Stri
     run_status_output(cmd)
 }
 
-fn read_commit_file(root: &str, commit: &str, path: &str) -> Result<String, String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(root)
-        .arg("show")
-        .arg(format!("{commit}:{path}"));
-    run_stdout(cmd)
-}
-
-#[allow(dead_code)]
-pub fn append_session_event(session_id: &str, payload: &str) -> Result<String, String> {
-    let root = repo_root()?;
-    append_session_event_in_root(&root, session_id, payload)
-}
-
-pub fn append_session_event_in_root(
-    root: &str,
-    session_id: &str,
-    payload: &str,
-) -> Result<String, String> {
-    let ref_name = format!("refs/gg/sessions/{session_id}");
-
-    let mut blob_cmd = Command::new("git");
-    blob_cmd
-        .arg("-C")
-        .arg(root)
-        .arg("hash-object")
-        .arg("-w")
-        .arg("--stdin");
-    let blob_hash = run_stdout_with_input(blob_cmd, payload)?;
-
-    let tree_input = format!("100644 blob {}\tevent.json\n", blob_hash.trim());
-    let mut tree_cmd = Command::new("git");
-    tree_cmd.arg("-C").arg(root).arg("mktree");
-    let tree_hash = run_stdout_with_input(tree_cmd, &tree_input)?;
-
-    let mut parent_cmd = Command::new("git");
-    parent_cmd
-        .arg("-C")
-        .arg(root)
-        .arg("rev-parse")
-        .arg("-q")
-        .arg("--verify")
-        .arg(&ref_name);
-    let parent = run_stdout(parent_cmd)
-        .ok()
-        .map(|value| value.trim().to_string());
-
-    let mut commit_cmd = Command::new("git");
-    commit_cmd
-        .arg("-C")
-        .arg(root)
-        .arg("commit-tree")
-        .arg(tree_hash.trim())
-        .arg("-m")
-        .arg(format!("gg session {session_id} event"));
-
-    if let Some(parent_hash) = parent {
-        commit_cmd.arg("-p").arg(parent_hash);
-    }
-
-    let commit_hash = run_stdout(commit_cmd)?;
-    let commit_hash = commit_hash.trim().to_string();
-
-    let mut update_cmd = Command::new("git");
-    update_cmd
-        .arg("-C")
-        .arg(root)
-        .arg("update-ref")
-        .arg(&ref_name)
-        .arg(&commit_hash);
-    run_status(update_cmd)?;
-
-    Ok(commit_hash)
-}
-
-#[allow(dead_code)]
-pub fn write_notes(ref_name: &str, commit_hash: &str, payload: &str) -> Result<(), String> {
-    let root = repo_root()?;
-    write_notes_in_root(&root, ref_name, commit_hash, payload)
-}
-
-pub fn write_notes_in_root(
-    root: &str,
-    ref_name: &str,
-    commit_hash: &str,
-    payload: &str,
-) -> Result<(), String> {
-    let temp_path = temp_note_path("gg-note.json");
-    fs::write(&temp_path, payload).map_err(|err| err.to_string())?;
-
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("notes")
-        .arg("--ref")
-        .arg(ref_name)
-        .arg("add")
-        .arg("-f")
-        .arg("--file")
-        .arg(&temp_path)
-        .arg(commit_hash)
-        .status()
-        .map_err(|err| err.to_string())?;
-
-    let _ = fs::remove_file(&temp_path);
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err("git notes add failed".to_string())
-    }
-}
-
 pub fn repo_root() -> Result<String, String> {
     let output = Command::new("git")
         .arg("rev-parse")
@@ -683,26 +455,6 @@ fn staged_is_clean(root: &str) -> Result<bool, String> {
 
 fn run_stdout(mut cmd: Command) -> Result<String, String> {
     let output = cmd.output().map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        return Err(format!("command failed: {:?}", cmd));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn run_stdout_with_input(mut cmd: Command, input: &str) -> Result<String, String> {
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|err| err.to_string())?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(input.as_bytes())
-            .map_err(|err| err.to_string())?;
-    }
-
-    let output = child.wait_with_output().map_err(|err| err.to_string())?;
     if !output.status.success() {
         return Err(format!("command failed: {:?}", cmd));
     }
@@ -831,10 +583,4 @@ fn run_status_output(mut cmd: Command) -> Result<GitOutput, String> {
         }
         Err(message)
     }
-}
-
-fn temp_note_path(filename: &str) -> PathBuf {
-    let mut path = env::temp_dir();
-    path.push(format!("gg-{}-{}", std::process::id(), filename));
-    path
 }

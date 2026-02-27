@@ -12,7 +12,7 @@ gg "<prompt>"
 ## Behavior
 - `gg` starts the daemon in the foreground and listens for sessions.
 - Ctrl+C ends all active sessions and writes an end event per session.
-- Assistant responses trigger auto-commit with metadata in notes/refs.
+- Assistant responses trigger auto-commit with local session metadata.
 - `gg status` opens the review UI.
 - Any other args are treated as a natural language prompt.
 
@@ -23,8 +23,7 @@ gg "<prompt>"
 - Enter accepts as-is and pushes (if remote exists and tree is clean)
 
 ## Storage
-- Session metadata: `refs/gg/sessions/<id>`
-- Notes: `refs/notes/gg`
+- Session metadata: `.git/gg/sessions/<id>` (local only)
 - Ignore rules: `.gitignore` and `.ggignore` are treated the same
 
 ## Prompt mode

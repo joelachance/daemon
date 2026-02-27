@@ -3,6 +3,7 @@ use crate::cursor;
 use crate::git::{self, GitOutput};
 use crate::opencode;
 use crate::session::{TokenUsage, ToolTokenUsage};
+use crate::store;
 use console::{style, Color};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,6 @@ use std::sync::{Arc, Mutex};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const DEFAULT_SOCKET: &str = "/tmp/ggd.sock";
-const NOTES_REF: &str = "refs/notes/gg";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Request {
@@ -74,7 +74,7 @@ struct SessionRegistry {
     sessions: HashMap<String, SessionState>,
 }
 
-pub fn run_daemon() -> Result<(), String> {
+pub fn run_daemon(start_stdin: bool) -> Result<(), String> {
     let socket = socket_path();
     if Path::new(&socket).exists() {
         fs::remove_file(&socket).map_err(|err| err.to_string())?;
@@ -83,8 +83,10 @@ pub fn run_daemon() -> Result<(), String> {
     let listener = UnixListener::bind(&socket).map_err(|err| err.to_string())?;
     eprintln!("daemon: listening on {socket}");
 
-    let registry = Arc::new(Mutex::new(load_registry()));
-    start_stdin_thread(registry.clone());
+    let registry = Arc::new(Mutex::new(SessionRegistry::default()));
+    if start_stdin {
+        start_stdin_thread(registry.clone());
+    }
     start_cursor_poll_thread();
     start_claude_poll_thread();
     start_opencode_poll_thread();
@@ -343,6 +345,7 @@ fn handle_stream(
     let kind = request.kind.clone();
     let response = match kind.as_str() {
         "event" => handle_event(&request, registry),
+        "end_all" => handle_session_end(&registry).map(|_| EventResult::pong()),
         "ping" => Ok(EventResult::pong()),
         _ => Err("unsupported request".to_string()),
     };
@@ -407,10 +410,6 @@ fn handle_event(
     registry: Arc<Mutex<SessionRegistry>>,
 ) -> Result<EventResult, String> {
     let session_id = request.session_id.as_ref().ok_or("missing session_id")?;
-    let summary = derive_summary(request.summary.as_deref(), request.meta.as_ref());
-    let tool_tokens = request.tool_tokens.clone().unwrap_or_default();
-    let git_stdout = request.git_stdout.unwrap_or(false);
-
     let cwd = match &request.cwd {
         Some(value) => value.clone(),
         None => env::current_dir()
@@ -419,6 +418,9 @@ fn handle_event(
             .to_string(),
     };
     let root = git::repo_root_from(&cwd).or_else(|_| git::repo_root())?;
+    let commit_message = build_commit_message(request.summary.as_deref(), request.meta.as_ref());
+    let tool_tokens = request.tool_tokens.clone().unwrap_or_default();
+    let git_stdout = request.git_stdout.unwrap_or(false);
     let tool = request
         .meta
         .as_ref()
@@ -450,7 +452,12 @@ fn handle_event(
         trailers.push(("Co-authored-by".to_string(), coauthor));
     }
 
-    let (commit_hash, commit_output) = git::commit_in_root(&root, &summary, &trailers)?;
+    let (commit_hash, commit_output) = git::commit_in_root_with_footer(
+        &root,
+        &commit_message.subject,
+        commit_message.footer.as_deref(),
+        &trailers,
+    )?;
 
     let timestamp = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -459,7 +466,7 @@ fn handle_event(
     let payload = SessionEventPayload {
         schema: 1,
         session_id: session_id.to_string(),
-        summary: summary.clone(),
+        summary: commit_message.subject.clone(),
         commit: commit_hash.clone(),
         paths: stage_paths.clone(),
         timestamp,
@@ -469,11 +476,7 @@ fn handle_event(
     };
 
     let payload_json = serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?;
-    let _ = git::append_session_event_in_root(&root, session_id, &payload_json)?;
-
-    if let Some(ref hash) = commit_hash {
-        let _ = git::write_notes_in_root(&root, NOTES_REF, hash, &payload_json)?;
-    }
+    let _ = store::write_event(&root, session_id, &payload_json)?;
 
     let mut git_stdout_buf = String::new();
     let mut git_stderr_buf = String::new();
@@ -498,7 +501,7 @@ fn handle_event(
 
     Ok(EventResult {
         message: "event stored".to_string(),
-        summary: Some(summary),
+        summary: Some(commit_message.subject),
         staged_paths: stage_paths,
         commit_hash,
         git_stdout: if git_stdout {
@@ -546,8 +549,7 @@ fn handle_session_end(registry: &Arc<Mutex<SessionRegistry>>) -> Result<(), Stri
         };
 
         let payload_json = serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?;
-        let _ =
-            git::append_session_event_in_root(&session.root, &session.session_id, &payload_json)?;
+        let _ = store::write_event(&session.root, &session.session_id, &payload_json)?;
 
         session.last_activity = now;
         session.explicit_end = true;
@@ -555,7 +557,6 @@ fn handle_session_end(registry: &Arc<Mutex<SessionRegistry>>) -> Result<(), Stri
         session.active = false;
     }
 
-    save_registry(&guard)?;
     Ok(())
 }
 
@@ -589,7 +590,10 @@ pub fn ensure_daemon_running() -> Result<(), String> {
     }
 
     let exe = env::current_exe().map_err(|err| err.to_string())?;
-    Command::new(exe).spawn().map_err(|err| err.to_string())?;
+    Command::new(exe)
+        .env("GG_DAEMON", "1")
+        .spawn()
+        .map_err(|err| err.to_string())?;
 
     for _ in 0..20 {
         if UnixStream::connect(&socket).is_ok() {
@@ -599,6 +603,28 @@ pub fn ensure_daemon_running() -> Result<(), String> {
     }
 
     Err("daemon failed to start".to_string())
+}
+
+pub fn end_all_sessions() -> Result<(), String> {
+    let socket = socket_path();
+    let mut stream = UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;
+    let request = Request {
+        kind: "end_all".to_string(),
+        session_id: None,
+        summary: None,
+        paths: None,
+        tokens: None,
+        tool_tokens: None,
+        meta: None,
+        cwd: None,
+        git_stdout: None,
+    };
+    let payload = serde_json::to_vec(&request).map_err(|err| err.to_string())?;
+    stream.write_all(&payload).map_err(|err| err.to_string())?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 fn socket_path() -> String {
@@ -636,23 +662,53 @@ fn coauthor_trailer() -> Option<String> {
     }
 }
 
-fn derive_summary(summary: Option<&str>, meta: Option<&serde_json::Value>) -> String {
-    let prompt_text = meta.and_then(extract_prompt_text);
-    let response_text = meta.and_then(extract_response_text);
+fn build_commit_message(summary: Option<&str>, meta: Option<&serde_json::Value>) -> CommitMessage {
+    let source = meta
+        .and_then(|value| value.get("source"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let agent = meta
+        .and_then(|value| value.get("agent"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let allow_meta = source != "daemon" && agent != "build";
 
-    if let Some(text) = prompt_text.as_deref().and_then(summarize_text) {
-        return text;
+    let prompt_text = if allow_meta {
+        meta.and_then(extract_prompt_text)
+    } else {
+        None
+    };
+    let response_text = if allow_meta {
+        meta.and_then(extract_response_text)
+    } else {
+        None
+    };
+    let mut base = prompt_text
+        .as_deref()
+        .and_then(summarize_text)
+        .or_else(|| response_text.as_deref().and_then(summarize_text))
+        .or_else(|| summary.and_then(summarize_text));
+    if base.is_none() || !allow_meta {
+        base = Some("update session changes".to_string());
     }
-    if let Some(text) = response_text.as_deref().and_then(summarize_text) {
-        return text;
-    }
-    if let Some(value) = summary {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    "assistant response".to_string()
+
+    let base_text = base.unwrap_or_else(|| "update session changes".to_string());
+    let prefix = classify_prefix(&base_text);
+    let subject = format!("{prefix}: {base_text}");
+    let subject = trim_subject(&subject, 72);
+
+    let issue = find_issue_number(
+        prompt_text.as_deref().unwrap_or(""),
+        git::branch_name().ok().flatten().as_deref().unwrap_or(""),
+    );
+    let footer = issue.map(|value| format!("Resolves #{value}"));
+
+    CommitMessage { subject, footer }
+}
+
+struct CommitMessage {
+    subject: String,
+    footer: Option<String>,
 }
 
 fn update_registry(
@@ -693,7 +749,7 @@ fn update_registry(
         entry.active = true;
     }
 
-    save_registry(&guard)
+    Ok(())
 }
 
 fn extract_end_flags(meta: Option<&serde_json::Value>) -> (bool, bool) {
@@ -710,34 +766,6 @@ fn extract_end_flags(meta: Option<&serde_json::Value>) -> (bool, bool) {
         .and_then(|val| val.as_bool())
         .unwrap_or(false);
     (explicit_end, soft_end)
-}
-
-fn registry_path() -> Option<std::path::PathBuf> {
-    let home = env::var("HOME").ok()?;
-    let dir = Path::new(&home).join(".gg");
-    let _ = fs::create_dir_all(&dir);
-    Some(dir.join("daemon.json"))
-}
-
-fn load_registry() -> SessionRegistry {
-    let path = match registry_path() {
-        Some(path) => path,
-        None => return SessionRegistry::default(),
-    };
-    let data = match fs::read_to_string(&path) {
-        Ok(data) => data,
-        Err(_) => return SessionRegistry::default(),
-    };
-    serde_json::from_str(&data).unwrap_or_default()
-}
-
-fn save_registry(registry: &SessionRegistry) -> Result<(), String> {
-    let path = match registry_path() {
-        Some(path) => path,
-        None => return Ok(()),
-    };
-    let data = serde_json::to_string_pretty(registry).map_err(|err| err.to_string())?;
-    fs::write(path, data).map_err(|err| err.to_string())
 }
 
 fn extract_prompt_text(meta: &serde_json::Value) -> Option<String> {
@@ -773,6 +801,120 @@ fn extract_response_text(meta: &serde_json::Value) -> Option<String> {
         return Some(value.to_string());
     }
     None
+}
+
+fn classify_prefix(text: &str) -> &'static str {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("fix") || lower.contains("bug") || lower.contains("error") {
+        return "fix";
+    }
+    if lower.contains("add") || lower.contains("create") || lower.contains("implement") {
+        return "feat";
+    }
+    if lower.contains("doc") || lower.contains("readme") {
+        return "docs";
+    }
+    if lower.contains("refactor") || lower.contains("cleanup") || lower.contains("restructure") {
+        return "refactor";
+    }
+    if lower.contains("test") {
+        return "test";
+    }
+    "chore"
+}
+
+fn trim_subject(value: &str, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        return value.to_string();
+    }
+    value.chars().take(max_len).collect::<String>()
+}
+
+fn find_issue_number(prompt: &str, branch: &str) -> Option<String> {
+    extract_issue_number(prompt).or_else(|| extract_issue_number(branch))
+}
+
+fn extract_issue_number(text: &str) -> Option<String> {
+    if let Some(value) = scan_issue_patterns(text) {
+        return Some(value);
+    }
+    first_number(text)
+}
+
+fn scan_issue_patterns(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    if let Some(hash) = extract_hash_number(&lower) {
+        return Some(hash);
+    }
+    for keyword in ["issue", "ticket", "jira"] {
+        if let Some(value) = extract_keyword_number(&lower, keyword) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn extract_hash_number(text: &str) -> Option<String> {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '#' {
+            let mut digits = String::new();
+            while let Some(next) = chars.peek() {
+                if next.is_ascii_digit() {
+                    digits.push(*next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !digits.is_empty() {
+                return Some(digits);
+            }
+        }
+    }
+    None
+}
+
+fn extract_keyword_number(text: &str, keyword: &str) -> Option<String> {
+    let mut search = text;
+    while let Some(index) = search.find(keyword) {
+        let after = &search[index + keyword.len()..];
+        let trimmed = after.trim_start_matches([':', '-', ' ']);
+        let mut digits = String::new();
+        let mut chars = trimmed.chars();
+        while let Some(ch) = chars.next() {
+            if ch.is_ascii_digit() {
+                digits.push(ch);
+            } else if !digits.is_empty() {
+                break;
+            } else if ch == '#' {
+                continue;
+            } else {
+                break;
+            }
+        }
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+        search = &search[index + keyword.len()..];
+    }
+    None
+}
+
+fn first_number(text: &str) -> Option<String> {
+    let mut digits = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else if !digits.is_empty() {
+            break;
+        }
+    }
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
 }
 
 fn summarize_text(value: &str) -> Option<String> {

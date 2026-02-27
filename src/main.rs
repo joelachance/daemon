@@ -10,6 +10,8 @@ mod git;
 mod opencode;
 mod session;
 mod status;
+mod store;
+mod dashboard;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -17,8 +19,21 @@ fn main() {
         Some(value) => value,
         None => {
             cli::print_banner();
-            if let Err(err) = daemon::run_daemon() {
+            if env::var("GG_DAEMON").ok().as_deref() == Some("1") {
+                if let Err(err) = daemon::run_daemon(false) {
+                    eprintln!("gg daemon: {err}");
+                    process::exit(1);
+                }
+                return;
+            }
+
+            if let Err(err) = daemon::ensure_daemon_running() {
                 eprintln!("gg daemon: {err}");
+                process::exit(1);
+            }
+
+            if let Err(err) = dashboard::run_dashboard() {
+                eprintln!("gg dashboard: {err}");
                 process::exit(1);
             }
             return;

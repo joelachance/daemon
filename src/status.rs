@@ -621,11 +621,7 @@ fn session_header_line(session: &SessionInfo) -> String {
         .as_deref()
         .unwrap_or("untitled session");
     let source = source_label(session.source.as_deref());
-    if source.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} - {source}")
-    }
+    format!("[{source}] {name}")
 }
 
 fn source_label(source: Option<&str>) -> &'static str {

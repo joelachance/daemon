@@ -114,10 +114,7 @@ fn render(
             .map(String::as_str)
             .unwrap_or("unknown");
         let header_line = session_header_line(session, width.saturating_sub(2));
-        write_line(
-            stdout,
-            format!("{} {}", cursor_mark, header_line.with(Color::White)),
-        )?;
+        write_line(stdout, format!("{} {}", cursor_mark, header_line))?;
         let status_line = session_status_line(last_event, width);
         write_line(stdout, status_line.with(Color::DarkGrey))?;
         write_line(stdout, end_label)?;
@@ -162,7 +159,7 @@ fn build_frame_key(
 
     for (idx, session) in sessions.iter().enumerate() {
         let cursor_mark = if idx == cursor_pos { ">" } else { " " };
-        let header_line = session_header_line(session, width.saturating_sub(2));
+        let header_line = session_header_line_plain(session, width.saturating_sub(2));
         output.push_str(&format!("{} {}", cursor_mark, header_line));
         output.push('\n');
         output.push_str(&session_status_line(
@@ -215,12 +212,22 @@ fn session_header_line(session: &SessionInfo, width: usize) -> String {
         .as_deref()
         .unwrap_or("untitled session");
     let source = source_label(session.source.as_deref());
-    let line = if source.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} - {source}")
-    };
-    truncate_to_width(&line, width)
+    let prefix = format!("[{source}] ");
+    let available = width.saturating_sub(prefix.chars().count());
+    let title = truncate_to_width(name, available);
+    format!("{}{}", prefix.with(Color::Cyan), title)
+}
+
+fn session_header_line_plain(session: &SessionInfo, width: usize) -> String {
+    let name = session
+        .display_name
+        .as_deref()
+        .unwrap_or("untitled session");
+    let source = source_label(session.source.as_deref());
+    let prefix = format!("[{source}] ");
+    let available = width.saturating_sub(prefix.chars().count());
+    let title = truncate_to_width(name, available);
+    format!("{prefix}{title}")
 }
 
 fn source_label(source: Option<&str>) -> &'static str {

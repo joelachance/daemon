@@ -1,40 +1,16 @@
 {
   "schema": 1,
   "session_id": "ses_362b710d0ffeDJfzkoe3vRjfIj",
-  "summary": "good enough, build",
+  "summary": "session timeout",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:01.821679Z",
-  "tokens": {
-    "input": 195,
-    "output": 420,
-    "total": 156263
-  },
+  "timestamp": "2026-02-27T05:19:02.635765Z",
+  "tokens": null,
   "tool_tokens": [],
   "meta": {
-    "agent": "build",
-    "finish": "stop",
-    "message_id": "msg_c9d7009330024pjqAQcHYQex6l",
-    "mode": "build",
-    "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d7066a20012ZzXF6Wkw9Xp7u",
-    "part_time_created": 1772167915170,
-    "path": {
-      "cwd": "/Users/joe/git/daemon",
-      "root": "/Users/joe/git/daemon"
-    },
-    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
-    "prompt": {
-      "text": "good enough, build"
-    },
-    "provider_id": "openai",
-    "response": {
-      "text": "Implemented Bedrock prompt mode end‑to‑end: a new Bedrock client module builds a Converse request to Nova Micro (with `GG_BEDROCK_MODEL` override), parses JSON plans, and the CLI now prints the plan, requires confirmation, then executes validated git commands. Wiring and dependencies were added to support AWS SDK + async runtime.\n\nDetails:\n- Added Bedrock client + plan parsing in `src/bedrock.rs`.\n- Replaced prompt stub with Bedrock plan/confirm/execute flow in `src/cli.rs`.\n- Registered module in `src/main.rs` and added AWS/Tokio dependencies in `Cargo.toml`.\n\nTests not run.\n\nIf you want to verify quickly:\n1) `cargo check`\n2) `GG_BEDROCK_MODEL=amazon.nova-micro-v1:0 gg \"show me git status\"`"
-    },
-    "role": "assistant",
-    "session_directory": "/Users/joe/git/daemon",
     "session_id": "ses_362b710d0ffeDJfzkoe3vRjfIj",
-    "session_title": "Bedrock prompt mode plan and HITL flow review",
-    "source": "opencode"
+    "soft_end": true,
+    "source": "opencode",
+    "timeout_secs": 600
   }
 }

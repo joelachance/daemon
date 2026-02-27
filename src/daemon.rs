@@ -77,6 +77,7 @@ struct SessionRegistry {
 }
 
 pub fn run_daemon(start_stdin: bool) -> Result<(), String> {
+    crate::cli::print_banner();
     let socket = socket_path();
     if Path::new(&socket).exists() {
         fs::remove_file(&socket).map_err(|err| err.to_string())?;

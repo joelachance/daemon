@@ -18,7 +18,6 @@ fn main() {
     let first = match args.next() {
         Some(value) => value,
         None => {
-            cli::print_banner();
             if env::var("GG_DAEMON").ok().as_deref() == Some("1") {
                 if let Err(err) = daemon::run_daemon(false) {
                     eprintln!("gg daemon: {err}");
@@ -26,6 +25,8 @@ fn main() {
                 }
                 return;
             }
+
+            cli::print_banner();
 
             if let Err(err) = daemon::ensure_daemon_running() {
                 eprintln!("gg daemon: {err}");

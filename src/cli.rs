@@ -55,6 +55,7 @@ pub fn print_banner() {
 ╚██████╔╝██║   ██║   ██║     ██║  ██║╚██████╔╝
  ╚═════╝ ╚═╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝ ╚═════╝"
     );
+    let _ = io::stdout().flush();
 }
 
 pub fn print_help() {

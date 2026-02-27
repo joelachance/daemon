@@ -4,6 +4,7 @@ use crate::store::{self, EndStatus, SessionCommit, SessionInfo};
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
+use crossterm::style::{Color, Stylize};
 use crossterm::terminal;
 use std::io::{self, Write};
 use std::time::Duration;
@@ -20,9 +21,9 @@ pub fn run_dashboard() -> Result<(), String> {
         if cursor >= sessions.len() && !sessions.is_empty() {
             cursor = sessions.len() - 1;
         }
-        let frame = build_frame(&sessions, cursor, status_msg.as_deref())?;
+        let frame = build_frame_key(&sessions, cursor, status_msg.as_deref())?;
         if frame != last_frame {
-            render(&mut stdout, &frame)?;
+            render(&mut stdout, &sessions, cursor, status_msg.as_deref())?;
             last_frame = frame;
         }
 
@@ -69,19 +70,86 @@ pub fn run_dashboard() -> Result<(), String> {
     Ok(())
 }
 
-fn render(stdout: &mut io::Stdout, frame: &str) -> Result<(), String> {
+fn render(
+    stdout: &mut io::Stdout,
+    sessions: &[SessionInfo],
+    cursor_pos: usize,
+    status_msg: Option<&str>,
+) -> Result<(), String> {
     execute!(
         stdout,
         cursor::MoveTo(0, 0),
-        terminal::Clear(terminal::ClearType::FromCursorDown)
+        terminal::Clear(terminal::ClearType::All)
     )
     .map_err(|err| err.to_string())?;
-    write!(stdout, "{frame}").map_err(|err| err.to_string())?;
+
+    writeln!(stdout, "{}", "gg live".with(Color::Cyan).bold()).map_err(|err| err.to_string())?;
+    writeln!(
+        stdout,
+        "{}",
+        "arrows/kj move  enter review (ended only)  ctrl+c end all  q quit".with(Color::DarkGrey)
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(stdout).map_err(|err| err.to_string())?;
+
+    if sessions.is_empty() {
+        writeln!(stdout, "{}", "no sessions found".with(Color::Yellow))
+            .map_err(|err| err.to_string())?;
+    }
+
+    for (idx, session) in sessions.iter().enumerate() {
+        let cursor_mark = if idx == cursor_pos { ">" } else { " " };
+        let cursor_mark = if idx == cursor_pos {
+            cursor_mark.with(Color::Green).bold()
+        } else {
+            cursor_mark.with(Color::DarkGrey)
+        };
+        let end_label = match session.end_status {
+            Some(EndStatus::Explicit) => "ended".with(Color::Red).bold(),
+            Some(EndStatus::Soft) => "soft end".with(Color::Yellow),
+            None => "active".with(Color::Green),
+        };
+        let last_event = session
+            .last_event
+            .as_ref()
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        let session_id = truncate(session.id.as_str(), 24);
+        let last_event = truncate(last_event, 19);
+        writeln!(
+            stdout,
+            "{} {}  {}  {} {}  {}",
+            cursor_mark,
+            session_id.with(Color::White).bold(),
+            format!("{} events", session.event_count).with(Color::DarkGrey),
+            "last".with(Color::DarkGrey),
+            last_event.with(Color::DarkGrey),
+            end_label
+        )
+        .map_err(|err| err.to_string())?;
+
+        let commits = load_recent_commits(&session.id, 6)?;
+        for commit in commits {
+            writeln!(
+                stdout,
+                "    {}  {}",
+                short_hash(&commit.commit).with(Color::DarkGrey),
+                truncate(&commit.summary, 72).with(Color::White)
+            )
+            .map_err(|err| err.to_string())?;
+        }
+    }
+
+    if let Some(message) = status_msg {
+        writeln!(stdout).map_err(|err| err.to_string())?;
+        writeln!(stdout, "{}", message.with(Color::Yellow)).map_err(|err| err.to_string())?;
+    }
+
     stdout.flush().map_err(|err| err.to_string())?;
     Ok(())
 }
 
-fn build_frame(
+fn build_frame_key(
     sessions: &[SessionInfo],
     cursor_pos: usize,
     status_msg: Option<&str>,
@@ -142,13 +210,25 @@ fn short_hash(value: &str) -> String {
     value.chars().take(7).collect::<String>()
 }
 
+fn truncate(value: &str, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        return value.to_string();
+    }
+    let mut out = value
+        .chars()
+        .take(max_len.saturating_sub(3))
+        .collect::<String>();
+    out.push_str("...");
+    out
+}
+
 struct RawModeGuard;
 
 impl RawModeGuard {
     fn new() -> Result<Self, String> {
         terminal::enable_raw_mode().map_err(|err| err.to_string())?;
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, cursor::Hide);
+        let _ = execute!(stdout, cursor::Hide, terminal::EnterAlternateScreen);
         Ok(Self)
     }
 }
@@ -157,7 +237,7 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, cursor::Show);
+        let _ = execute!(stdout, cursor::Show, terminal::LeaveAlternateScreen);
         let _ = stdout.flush();
     }
 }

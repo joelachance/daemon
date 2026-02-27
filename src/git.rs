@@ -374,6 +374,16 @@ pub fn push_in_root(root: &str) -> Result<(), String> {
     run_status(cmd)
 }
 
+pub fn push_branch_in_root(root: &str, branch: &str) -> Result<(), String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(root)
+        .arg("push")
+        .arg("origin")
+        .arg(branch);
+    run_status(cmd)
+}
+
 pub fn head_commit() -> Result<String, String> {
     let root = repo_root()?;
     let output = Command::new("git")
@@ -578,6 +588,59 @@ pub fn working_tree_clean() -> Result<bool, String> {
 pub fn working_tree_clean_in_root(root: &str) -> Result<bool, String> {
     let paths = list_changed_paths_in_root(root)?;
     Ok(paths.is_empty())
+}
+
+pub fn list_remotes_in_root(root: &str) -> Result<Vec<String>, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("remote")
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err("git remote failed".to_string());
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+pub fn has_remote_in_root(root: &str) -> Result<bool, String> {
+    Ok(!list_remotes_in_root(root)?.is_empty())
+}
+
+pub fn branch_exists_in_root(root: &str, branch: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("show-ref")
+        .arg("--verify")
+        .arg("--quiet")
+        .arg(format!("refs/heads/{branch}"))
+        .output()
+        .map_err(|err| err.to_string())?;
+    Ok(output.status.success())
+}
+
+pub fn checkout_branch_in_root(root: &str, branch: &str) -> Result<(), String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).arg("checkout").arg(branch);
+    run_status(cmd)
+}
+
+pub fn create_branch_in_root(root: &str, branch: &str) -> Result<(), String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(root)
+        .arg("checkout")
+        .arg("-b")
+        .arg(branch);
+    run_status(cmd)
 }
 
 pub fn upstream_ahead_count_in_root(root: &str) -> Result<Option<u64>, String> {

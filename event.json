@@ -1,35 +1,35 @@
 {
   "schema": 1,
   "session_id": "ses_362fd454dffexTw0qn5EWslw1M",
-  "summary": "It should immediately switch to active and prevent review actions until it ends again",
+  "summary": "I think when the Control-C is pressed you should exit all sessions but you should still keep metadata on those sessions ...",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:01.984991Z",
+  "timestamp": "2026-02-27T05:19:02.021495Z",
   "tokens": {
-    "input": 67434,
-    "output": 732,
-    "total": 68166
+    "input": 2007,
+    "output": 735,
+    "total": 68918
   },
   "tool_tokens": [],
   "meta": {
     "agent": "plan",
     "finish": "stop",
-    "message_id": "msg_c9d7be1c1002F67AY1ayZowjdd",
+    "message_id": "msg_c9d7d675a002SCE8tyKiYkSBKZ",
     "mode": "plan",
     "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d7bf2c0001vpt6Xpfp1USi3z",
-    "part_time_created": 1772168671936,
+    "part_id": "prt_c9d7d734c001GXw3KNcoftF68B",
+    "part_time_created": 1772168770380,
     "path": {
       "cwd": "/Users/joe/git/daemon",
       "root": "/Users/joe/git/daemon"
     },
     "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
     "prompt": {
-      "text": "It should immediately switch to active and prevent review actions until it ends again "
+      "text": "I think when the Control-C is pressed you should exit all sessions but you should still keep metadata on those sessions so if the daemon is relaunched immediately it can pick up where it left off "
     },
     "provider_id": "openai",
     "response": {
-      "text": "Great, I’ll lock the behavior to “immediately switch to active and block review until ended again.” Here’s the final step‑by‑step execution plan with file‑level checklists.\n\nStep 1) Ctrl+C end signal (daemon)\n- Update stdin handler to detect `0x03` and mark `meta.end = true`.\n- Record `signal = \"CTRL+C\"`.\n- Update help text and README.\nFiles: `src/daemon.rs`, `src/cli.rs`, `README.md`\n\nStep 2) Review UI defaults + actions\n- Enter = accept as‑is (no action).\n- Squash key is lowercase `s`.\n- Keep arrows + j/k + space; no gg/G.\nFiles: `src/status.rs`\n\nStep 3) Remove risky squash/amend implementations\n- Amend: target selected commit (not parent); if selection doesn’t include HEAD, abort with message.\n- Squash: require contiguous selection including HEAD; use first commit summary (no auto “Squash N commits” unless explicitly requested later).\nFiles: `src/status.rs`, `src/git.rs`\n\nStep 4) Push policy fix\n- Replace `push_force_with_lease` with standard `git push`.\n- Keep gating: remote exists + working tree clean.\nFiles: `src/status.rs`, `src/git.rs`\n\nStep 5) Unified session registry (multi‑session)\n- Replace single `ActiveSession` with a registry keyed by `(tool, session_id)`:\n  - `root`, `last_activity_ts`, `explicit_end`, `soft_end`, `active`\n- Update event handling to update registry for all events.\n- Ctrl+C should mark all active sessions ended or only current repo’s session (choose one; see note below).\nFiles: `src/daemon.rs`, `src/session.rs`\n\nStep 6) OpenCode end detection + timeout\n- Emit explicit end when user prompt contains `/exit`.\n- Add inactivity timeout for OpenCode only:\n  - default 600s\n  - env override `GG_OPENCODE_TIMEOUT_SECS`\n  - emit soft end (not explicit) on timeout\nFiles: `src/opencode.rs`, `schemas/opencode.md`, `src/daemon.rs`\n\nStep 7) Cursor end signal\n- When `status == \"completed\"`, emit explicit end event (`meta.end = true`).\nFiles: `src/cursor.rs`\n\nStep 8) “Status can be revoked” behavior\n- If a session was marked ended (soft or explicit) and new events arrive:\n  - immediately mark active\n  - `gg status` must block review for that session until it ends again\nFiles: `src/daemon.rs`, `src/status.rs`, `src/git.rs` (if session end check changes)\n\nStep 9) Documentation refresh\n- Remove legacy `gg session …` commands.\n- Update usage to `gg`, `gg status`, `gg \"<prompt>\"`.\n- Update end‑session guidance to Ctrl+C.\nFiles: `README.md`, `src/cli.rs`\n\nOne small decision to finalize\n- When Ctrl+C is pressed, should it end all active sessions across tools, or only the most recently active session in the current repo?  \nRecommended: end only the most recent active session per repo to avoid stopping other workstreams.\n\nIf you confirm that, I can prepare per‑file edit instructions in the exact order you want the agents to execute."
+      "text": "Understood. Ctrl+C ends all active sessions, and we persist enough metadata so a restarted daemon can resume. Here’s the final execution plan with that requirement baked in.\n\nStep-by-step execution plan (final)\n\nStep 1) Ctrl+C ends all sessions + persistence\n- Detect `0x03` in stdin thread.\n- Mark all active sessions as ended (`explicit_end = true`, `signal = \"CTRL+C\"`).\n- Persist registry state to disk so a restarted daemon can resume.\n- Update help/README to reference Ctrl+C.\nFiles: `src/daemon.rs`, `src/cli.rs`, `README.md`, `src/session.rs` (if new structs)\n\nStep 2) Unified session registry (multi-session + persistence)\n- Replace single `ActiveSession` with a registry keyed by `(tool, session_id)`.\n- Track: `root`, `last_activity_ts`, `explicit_end`, `soft_end`, `active`.\n- Load registry on daemon start; save on updates and on Ctrl+C.\nFiles: `src/daemon.rs`, `src/session.rs`\n\nStep 3) Review UI defaults + actions\n- Enter = accept as‑is.\n- `s` = squash (lowercase).\n- Arrows + j/k + space remain; no gg/G.\nFiles: `src/status.rs`\n\nStep 4) Remove risky squash/amend behavior\n- Amend targets selected commit; refuse if selection doesn’t include HEAD.\n- Squash requires contiguous selection including HEAD; use first commit summary as message (no auto “Squash N commits”).\nFiles: `src/status.rs`, `src/git.rs`\n\nStep 5) Push policy fix\n- Replace force push with `git push`.\n- Gated by remote exists + working tree clean.\nFiles: `src/status.rs`, `src/git.rs`\n\nStep 6) Cursor explicit end signal\n- On `status == \"completed\"`, emit explicit end event (`meta.end = true`).\nFiles: `src/cursor.rs`\n\nStep 7) OpenCode explicit end + timeout (600s)\n- Detect `/exit` in user prompt → explicit end.\n- Add inactivity timeout for OpenCode only:\n  - default 600s\n  - env override `GG_OPENCODE_TIMEOUT_SECS`\n  - soft end (not explicit).\nFiles: `src/opencode.rs`, `schemas/opencode.md`, `src/daemon.rs`\n\nStep 8) “Status can be revoked” behavior\n- If a session marked ended (soft or explicit) receives new events:\n  - mark active again\n  - `gg status` must block review until it ends again.\nFiles: `src/daemon.rs`, `src/status.rs`, `src/git.rs` (session end checks)\n\nStep 9) Documentation refresh\n- Remove legacy `gg session …` references.\n- Update usage: `gg`, `gg status`, `gg \"<prompt>\"`.\n- Update Ctrl+C guidance.\nFiles: `README.md`, `src/cli.rs`\n\nNotes on persistence\n- Store registry state under `.git/gg/daemon.json` (or similar) so it survives daemon restarts per repo.\n- On daemon start: load state, mark sessions as active unless explicitly ended and no new events have arrived.\n\nIf you want, I can turn each step into per‑file edit instructions with exact function names and data structures (still read‑only, no changes)."
     },
     "role": "assistant",
     "session_directory": "/Users/joe/git/daemon",

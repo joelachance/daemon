@@ -1,40 +1,16 @@
 {
   "schema": 1,
   "session_id": "ses_362b7cac2ffeHOWGg3wvo6R1Pr",
-  "summary": "Yeah try to find prompt.txt in the database schema and build around that",
+  "summary": "session timeout",
   "commit": null,
   "paths": [],
-  "timestamp": "2026-02-27T05:19:01.740483Z",
-  "tokens": {
-    "input": 757,
-    "output": 909,
-    "total": 56578
-  },
+  "timestamp": "2026-02-27T05:19:02.485378Z",
+  "tokens": null,
   "tool_tokens": [],
   "meta": {
-    "agent": "build",
-    "finish": "stop",
-    "message_id": "msg_c9d64e26a002DoyDDbKpNCF0xS",
-    "mode": "build",
-    "model_id": "gpt-5.2-codex",
-    "part_id": "prt_c9d650a1c001Ih01d8KjL52rR1",
-    "part_time_created": 1772167170588,
-    "path": {
-      "cwd": "/Users/joe/git/daemon",
-      "root": "/Users/joe/git/daemon"
-    },
-    "project_id": "2c183d1b6c822cb95a6a43cadc9d3390ac7db9bc",
-    "prompt": {
-      "text": "Yeah try to find prompt.txt in the database schema and build around that "
-    },
-    "provider_id": "openai",
-    "response": {
-      "text": "I found the prompt text in the OpenCode DB and wired it into the `meta.prompt.text` field for assistant events, so the commit summary can now reflect session intent rather than raw assistant output.\n\nWhat I changed\n- Extract the latest user prompt text for each assistant part from the OpenCode DB (`message` + `part` tables) and attach it to `meta.prompt.text`.\n- Replace the placeholder `prompt` field for OpenCode events with the real prompt text so summary derivation can use intent-first text.\n- Keep existing response text capture in `meta.response.text` for fallback.\n\nFiles updated\n- `src/opencode.rs`\n\nDetails\n- Prompt text lives in the `part` table for user messages (`json_extract(p.data, '$.text')`), joined through `message` with `role = 'user'`. The query picks the most recent user prompt at or before the assistant part time.\n\nIf you want me to also derive a higher-level “intent summary” from the user message `summary.title` field (present in some user message JSON), I can add that as `meta.intent` and make the summary use it first.\n\nSuggested next step\n1. Run `cargo test` or a quick build to ensure the new query compiles cleanly."
-    },
-    "role": "assistant",
-    "session_directory": "/Users/joe/git/daemon",
     "session_id": "ses_362b7cac2ffeHOWGg3wvo6R1Pr",
-    "session_title": "Auto-commit after each assistant response plan",
-    "source": "opencode"
+    "soft_end": true,
+    "source": "opencode",
+    "timeout_secs": 600
   }
 }

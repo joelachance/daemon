@@ -1,4 +1,5 @@
 use crate::daemon;
+use crate::git;
 use crate::status;
 use crate::store::{self, EndStatus, SessionCommit, SessionInfo};
 use crossterm::cursor;
@@ -8,6 +9,7 @@ use crossterm::style::{Color, Stylize};
 use crossterm::terminal;
 use std::fmt::Display;
 use std::io::{self, Write};
+use std::process::Command;
 use std::time::Duration;
 
 const DASHBOARD_BANNER: &str = r"██████╗ ██╗████████╗██████╗ ██████╗  ██████╗
@@ -70,6 +72,16 @@ pub fn run_dashboard() -> Result<(), String> {
                         daemon::end_all_sessions()?;
                         status_msg = Some("sent end signal".to_string());
                     }
+                    KeyCode::Char('r') => {
+                        if let Some(session) = sessions.get(cursor) {
+                            match continue_session_in_terminal(&session.id) {
+                                Ok(message) => status_msg = Some(message),
+                                Err(err) => status_msg = Some(err),
+                            }
+                        } else {
+                            status_msg = Some("no session selected".to_string());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -99,7 +111,8 @@ fn render(
     write_line(stdout, "Satori Computer Co".with(Color::Cyan).bold())?;
     write_line(
         stdout,
-        "arrows/kj move  enter review (ended only)  ctrl+c end all  q quit".with(Color::DarkGrey),
+        "arrows/kj move  enter review (ended only)  r continue  ctrl+c end all  q quit"
+            .with(Color::DarkGrey),
     )?;
     write_blank_line(stdout)?;
 
@@ -163,7 +176,9 @@ fn build_frame_key(
     output.push_str(DASHBOARD_BANNER);
     output.push('\n');
     output.push_str("Satori Computer Co\n");
-    output.push_str("arrows/kj move  enter review (ended only)  ctrl+c end all  q quit\n\n");
+    output.push_str(
+        "arrows/kj move  enter review (ended only)  r continue  ctrl+c end all  q quit\n\n",
+    );
 
     if sessions.is_empty() {
         output.push_str("no sessions found\n");
@@ -290,6 +305,44 @@ fn truncate_to_width(value: &str, max_len: usize) -> String {
         .collect::<String>();
     out.push_str("...");
     out
+}
+
+fn continue_session_in_terminal(session_id: &str) -> Result<String, String> {
+    let root = git::repo_root()?;
+    let command = format!(
+        "cd {} && opencode -s {}",
+        shell_escape(&root),
+        shell_escape(session_id)
+    );
+    let script = format!(
+        "tell application \"Terminal\" to do script \"{}\" in (make new window)",
+        escape_applescript_string(&command)
+    );
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|err| format!("failed to launch Terminal: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err("failed to launch Terminal".to_string());
+        }
+        return Err(format!("failed to launch Terminal: {stderr}"));
+    }
+    Ok("launched opencode in new terminal".to_string())
+}
+
+fn shell_escape(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+fn escape_applescript_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 struct RawModeGuard;

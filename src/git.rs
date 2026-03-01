@@ -368,12 +368,6 @@ pub fn push() -> Result<(), String> {
     run_status(cmd)
 }
 
-pub fn push_in_root(root: &str) -> Result<(), String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(root).arg("push");
-    run_status(cmd)
-}
-
 pub fn push_branch_in_root(root: &str, branch: &str) -> Result<(), String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C")

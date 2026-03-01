@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 pub struct SessionInfo {
     pub id: String,
     pub last_event: Option<String>,
-    pub event_count: usize,
     pub end_status: Option<EndStatus>,
     pub display_name: Option<String>,
     pub source: Option<String>,
@@ -64,12 +63,11 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>, String> {
         if session_id.trim().is_empty() {
             continue;
         }
-        let (event_count, last_event, end_status, display_name, source) =
+        let (last_event, end_status, display_name, source) =
             session_event_stats(&root, &session_id)?;
         sessions.push(SessionInfo {
             id: session_id,
             last_event,
-            event_count,
             end_status,
             display_name,
             source,
@@ -159,7 +157,6 @@ fn session_event_stats(
     session_id: &str,
 ) -> Result<
     (
-        usize,
         Option<String>,
         Option<EndStatus>,
         Option<String>,
@@ -168,7 +165,6 @@ fn session_event_stats(
     String,
 > {
     let events = list_event_files(root, session_id)?;
-    let event_count = events.len();
     let (last_event, end_status, display_name, source) = match events.last() {
         Some(path) => {
             let payload = fs::read_to_string(path).map_err(|err| err.to_string())?;
@@ -185,7 +181,7 @@ fn session_event_stats(
         }
         None => (None, None, None, None),
     };
-    Ok((event_count, last_event, end_status, display_name, source))
+    Ok((last_event, end_status, display_name, source))
 }
 
 fn list_event_files(root: &str, session_id: &str) -> Result<Vec<PathBuf>, String> {

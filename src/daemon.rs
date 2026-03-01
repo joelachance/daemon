@@ -440,7 +440,7 @@ fn parse_event_timestamp(value: &str) -> Option<i64> {
     }
 
     if let Some((date, rest)) = trimmed.split_once('T') {
-        let mut rest_value = rest.to_string();
+        let rest_value = rest.to_string();
         let mut replaced = String::new();
         let mut hyphen_count = 0usize;
         for ch in rest_value.chars() {

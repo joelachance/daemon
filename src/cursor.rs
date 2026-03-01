@@ -11,7 +11,7 @@ use std::time::Duration;
 use sysinfo::System;
 
 const DEFAULT_GLOBAL_DB: &str =
-    "/Users/joe/Library/Application Support/Cursor/User/globalStorage/state.vscdb";
+    "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb";
 
 #[derive(Debug, Clone)]
 struct CursorSession {
@@ -249,6 +249,7 @@ pub fn poll_completed_sessions(
 
 fn open_cursor_db() -> Result<Connection, String> {
     let db_path = env::var("GG_CURSOR_DB").unwrap_or_else(|_| DEFAULT_GLOBAL_DB.to_string());
+    let db_path = expand_tilde(&db_path);
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -257,6 +258,16 @@ fn open_cursor_db() -> Result<Connection, String> {
     conn.busy_timeout(Duration::from_millis(250))
         .map_err(|err| err.to_string())?;
     Ok(conn)
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Ok(home) = env::var("HOME") {
+            let trimmed = path.trim_start_matches('~');
+            return format!("{home}{trimmed}");
+        }
+    }
+    path.to_string()
 }
 
 fn fetch_sessions_for_repo(conn: &Connection, root: &Path) -> Result<Vec<CursorSession>, String> {

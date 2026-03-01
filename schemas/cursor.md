@@ -6,12 +6,12 @@ It is based on local inspection of Cursor 2.5.x on macOS.
 ## Locations
 
 - Global DB:
-  - /Users/joe/Library/Application Support/Cursor/User/globalStorage/state.vscdb
+- ~/Library/Application Support/Cursor/User/globalStorage/state.vscdb
 - Workspace DB:
-  - /Users/joe/Library/Application Support/Cursor/User/workspaceStorage/<workspace_id>/state.vscdb
+- ~/Library/Application Support/Cursor/User/workspaceStorage/<workspace_id>/state.vscdb
 - Workspace mapping file:
-  - /Users/joe/Library/Application Support/Cursor/User/workspaceStorage/<workspace_id>/workspace.json
-  - Key: "folder": "file:///Users/joe/git/<repo>"
+- ~/Library/Application Support/Cursor/User/workspaceStorage/<workspace_id>/workspace.json
+- Key: "folder": "file:///~/git/<repo>"
 
 ## Tables
 
@@ -82,9 +82,9 @@ The JSON is large and nested. Observed fields (Cursor 2.5.x):
 ## How to locate the right workspace
 
 1) Enumerate workspaceStorage directories:
-   - /Users/joe/Library/Application Support/Cursor/User/workspaceStorage/*
+   - ~/Library/Application Support/Cursor/User/workspaceStorage/*
 2) Read workspace.json to map to the repo path:
-   - "folder": "file:///Users/joe/git/<repo>"
+   - "folder": "file:///~/git/<repo>"
 
 If the repo is not present, open it in Cursor to generate the workspace entry.
 
@@ -110,7 +110,7 @@ List composerData keys:
 
 Find composerData containing a repo path:
   select key from cursorDiskKV
-  where cast(value as text) like '%/Users/joe/git/daemon%';
+   where cast(value as text) like '%/~/git/daemon%';
 
 Fetch a composerData JSON:
   select cast(value as text) from cursorDiskKV

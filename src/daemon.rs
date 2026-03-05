@@ -382,6 +382,7 @@ pub fn ensure_daemon_running() -> Result<(), String> {
     Err("daemon failed to start".to_string())
 }
 
+#[allow(dead_code)]
 pub fn end_all_sessions() -> Result<(), String> {
     let socket = socket_path();
     let mut stream = UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;

@@ -25,6 +25,7 @@ pub fn run_status_ui() -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn run_review_for_session(session_id: &str) -> Result<(), String> {
     daemon::ensure_daemon_running()?;
     let drafts = store::list_drafts(session_id)?;
@@ -90,8 +91,10 @@ pub fn run_review_for_session(session_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 struct RawModeGuard;
 impl RawModeGuard {
+    #[allow(dead_code)]
     fn new() -> Result<Self, String> {
         terminal::enable_raw_mode().map_err(|err| err.to_string())?;
         Ok(Self)

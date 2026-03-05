@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use ignore::gitignore::GitignoreBuilder;
 use ignore::WalkBuilder;
 use std::ffi::OsStr;

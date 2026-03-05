@@ -233,6 +233,7 @@ pub fn insert_change(change: &Change) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn list_changes_for_turn(turn_id: &str) -> Result<Vec<Change>, String> {
     let conn = open()?;
     let mut stmt = conn
@@ -386,6 +387,7 @@ pub fn get_change(change_id: &str) -> Result<Option<Change>, String> {
     Ok(value)
 }
 
+#[allow(dead_code)]
 pub fn update_draft_message(draft_id: &str, message: &str) -> Result<(), String> {
     let conn = open()?;
     conn.execute(

@@ -16,6 +16,7 @@ pub struct ToolCall {
     pub timestamp: i64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Turn {
     pub id: String,

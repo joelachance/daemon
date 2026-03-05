@@ -22,10 +22,6 @@ pub fn run_command(command: &str, _args: &[String]) -> Result<(), String> {
     }
 }
 
-pub fn run_prompt(prompt: &str) -> Result<(), String> {
-    Err(format!("prompt mode removed: {prompt}"))
-}
-
 pub fn print_banner() {
     println!(
         "{art}\nSatori Computer Co",

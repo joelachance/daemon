@@ -3,7 +3,6 @@ use std::process;
 
 mod claude;
 mod api;
-mod bedrock;
 mod cli;
 mod cursor;
 mod daemon;
@@ -60,16 +59,5 @@ fn main() {
         return;
     }
 
-    let mut prompt_parts = Vec::new();
-    prompt_parts.push(first);
-    prompt_parts.extend(args);
-    let prompt = prompt_parts.join(" ");
-    if prompt.trim().is_empty() {
-        cli::print_help();
-        return;
-    }
-    if let Err(err) = cli::run_prompt(&prompt) {
-        eprintln!("error: {err}");
-        process::exit(1);
-    }
+    cli::print_help();
 }

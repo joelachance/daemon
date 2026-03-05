@@ -677,3 +677,20 @@ fn stable_id(input: &str) -> String {
     let digest = hasher.finalize();
     format!("{digest:x}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hunk_header() {
+        let (os, oc, ns, nc) = parse_hunk_header("@@ -10,2 +12,3 @@");
+        assert_eq!((os, oc, ns, nc), (10, 2, 12, 3));
+    }
+
+    #[test]
+    fn branch_slug_fallback() {
+        let name = suggest_branch_name("");
+        assert_eq!(name, "feature/session");
+    }
+}

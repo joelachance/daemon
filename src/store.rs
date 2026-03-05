@@ -1,11 +1,12 @@
 use crate::session::{Change, ChangeLineRange, DraftCommit, DraftStatus, ToolCall};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use time::OffsetDateTime;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub id: String,
     pub ide: String,

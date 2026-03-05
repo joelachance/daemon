@@ -82,3 +82,42 @@ fn infer_subject(prompt: &str) -> String {
     }
     subject
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{Change, ChangeLineRange};
+
+    fn change(path: &str, old_count: i64, new_count: i64) -> Change {
+        Change {
+            id: "id".to_string(),
+            session_id: "s".to_string(),
+            prompt_id: "t".to_string(),
+            file_path: path.to_string(),
+            base_commit_sha: "base".to_string(),
+            diff: String::new(),
+            line_range: ChangeLineRange {
+                old_start: 1,
+                old_count,
+                new_start: 1,
+                new_count,
+            },
+            captured_at: 0,
+            change_type: "edit".to_string(),
+        }
+    }
+
+    #[test]
+    fn infers_docs_type() {
+        let changes = vec![change("docs/README.md", 1, 2)];
+        let msg = infer_message("Update docs", &changes);
+        assert!(msg.starts_with("docs"));
+    }
+
+    #[test]
+    fn infers_scope_when_common_dir() {
+        let changes = vec![change("src/api/a.ts", 1, 1), change("src/api/b.ts", 1, 1)];
+        let msg = infer_message("Fix handlers", &changes);
+        assert!(msg.contains("(api):"));
+    }
+}

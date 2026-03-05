@@ -6,8 +6,8 @@ assistant responses for harvesting.
 ## Locations
 
 - Default DB (SQLite):
-  - /Users/joe/.local/share/opencode/opencode.db
-  - WAL/SHM: /Users/joe/.local/share/opencode/opencode.db-wal / .db-shm
+- ~/.local/share/opencode/opencode.db
+- WAL/SHM: ~/.local/share/opencode/opencode.db-wal / .db-shm
 - Overrides:
   - GG_OPENCODE_DB (preferred for gg)
   - OPENCODE_DB (fallback)

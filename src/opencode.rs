@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use time::OffsetDateTime;
 
-const DEFAULT_DB_PATH: &str = "/Users/joe/.local/share/opencode/opencode.db";
+const DEFAULT_DB_PATH: &str = "~/.local/share/opencode/opencode.db";
 
 #[derive(Debug, Clone)]
 struct OpenCodeRow {
@@ -204,6 +204,7 @@ fn open_opencode_db() -> Result<Option<Connection>, String> {
         .ok()
         .or_else(|| env::var("OPENCODE_DB").ok())
         .unwrap_or_else(|| DEFAULT_DB_PATH.to_string());
+    let db_path = expand_tilde(&db_path);
     if !Path::new(&db_path).exists() {
         return Ok(None);
     }
@@ -212,6 +213,16 @@ fn open_opencode_db() -> Result<Option<Connection>, String> {
     conn.busy_timeout(Duration::from_millis(250))
         .map_err(|err| err.to_string())?;
     Ok(Some(conn))
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Ok(home) = env::var("HOME") {
+            let trimmed = path.trim_start_matches('~');
+            return format!("{home}{trimmed}");
+        }
+    }
+    path.to_string()
 }
 
 fn fetch_assistant_parts_for_repo(

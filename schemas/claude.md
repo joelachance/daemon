@@ -16,7 +16,7 @@ and how to extract model, token, and prompt/response history.
 
 `<project_dir>` is the repo path with `/` replaced by `-`:
 
-- Repo path: `/Users/joe/git/daemon`
+- Repo path: `~/git/daemon`
 - Project dir: `-Users-joe-git-daemon`
 
 If the repo is not present, open it in Claude Code to create the entry.

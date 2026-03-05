@@ -2,11 +2,13 @@ use std::env;
 use std::process;
 
 mod claude;
+mod api;
 mod bedrock;
 mod cli;
 mod cursor;
 mod daemon;
 mod git;
+mod grouping;
 mod opencode;
 mod session;
 mod status;
@@ -19,6 +21,9 @@ fn main() {
         Some(value) => value,
         None => {
             if env::var("GG_DAEMON").ok().as_deref() == Some("1") {
+                let _ = std::thread::spawn(|| {
+                    let _ = api::run_api_server();
+                });
                 if let Err(err) = daemon::run_daemon(false) {
                     eprintln!("gg daemon: {err}");
                     process::exit(1);

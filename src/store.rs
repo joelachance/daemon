@@ -233,42 +233,6 @@ pub fn insert_change(change: &Change) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn list_changes_for_turn(turn_id: &str) -> Result<Vec<Change>, String> {
-    let conn = open()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, session_id, prompt_id, file_path, base_commit_sha, diff, old_start, old_count, new_start, new_count, change_type, captured_at
-             FROM changes WHERE prompt_id = ?1 ORDER BY captured_at ASC",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![turn_id], |row| {
-            Ok(Change {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                prompt_id: row.get(2)?,
-                file_path: row.get(3)?,
-                base_commit_sha: row.get(4)?,
-                diff: row.get(5)?,
-                line_range: ChangeLineRange {
-                    old_start: row.get(6)?,
-                    old_count: row.get(7)?,
-                    new_start: row.get(8)?,
-                    new_count: row.get(9)?,
-                },
-                change_type: row.get(10)?,
-                captured_at: row.get(11)?,
-            })
-        })
-        .map_err(|err| err.to_string())?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|err| err.to_string())?);
-    }
-    Ok(out)
-}
-
 pub fn create_draft(
     draft_id: &str,
     session_id: &str,
@@ -387,17 +351,6 @@ pub fn get_change(change_id: &str) -> Result<Option<Change>, String> {
     Ok(value)
 }
 
-#[allow(dead_code)]
-pub fn update_draft_message(draft_id: &str, message: &str) -> Result<(), String> {
-    let conn = open()?;
-    conn.execute(
-        "UPDATE drafts SET message = ?2 WHERE id = ?1",
-        params![draft_id, message],
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(())
-}
-
 pub fn update_draft_status(draft_id: &str, status: DraftStatus) -> Result<(), String> {
     let conn = open()?;
     conn.execute(
@@ -463,7 +416,7 @@ pub fn list_sessions_for_repo(repo_path: &str) -> Result<Vec<SessionInfo>, Strin
                 base_commit_sha: row.get(3)?,
                 suggested_branch: row.get(4)?,
                 confirmed_branch: row.get(5)?,
-                ticket: normalize_optional(row.get::<usize, String>(6)?),
+                ticket: normalize_optional(row.get::<usize, Option<String>>(6)?),
                 started_at: row.get(7)?,
                 ended_at: row.get(8)?,
             })
@@ -493,7 +446,7 @@ pub fn get_session(session_id: &str) -> Result<Option<SessionInfo>, String> {
                 base_commit_sha: row.get(3)?,
                 suggested_branch: row.get(4)?,
                 confirmed_branch: row.get(5)?,
-                ticket: normalize_optional(row.get::<usize, String>(6)?),
+                ticket: normalize_optional(row.get::<usize, Option<String>>(6)?),
                 started_at: row.get(7)?,
                 ended_at: row.get(8)?,
             })
@@ -525,12 +478,14 @@ fn next_draft_change_order_with_conn(conn: &Connection, draft_id: &str) -> Resul
     Ok(max_order + 1)
 }
 
-fn normalize_optional(value: String) -> Option<String> {
-    if value.trim().is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|item| {
+        if item.trim().is_empty() {
+            None
+        } else {
+            Some(item)
+        }
+    })
 }
 
 fn now_ts() -> i64 {

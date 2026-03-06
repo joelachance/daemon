@@ -1,106 +1,67 @@
 use crate::daemon;
 use crate::git;
 use crate::store;
-use crossterm::cursor;
-use crossterm::event::{self, Event, KeyCode};
-use crossterm::execute;
-use crossterm::style::{Color, Stylize};
-use crossterm::terminal;
 use std::io::{self, Write};
 
 pub fn run_dashboard() -> Result<(), String> {
     daemon::ensure_daemon_running()?;
     let root = git::repo_root()?;
-    let mut stdout = io::stdout();
-    let _guard = RawModeGuard::new()?;
-    let mut cursor_idx = 0usize;
-    let mut status = String::new();
 
     loop {
+        print!("\x1B[2J\x1B[H");
+        println!("vibe dashboard");
+        println!("commands: r=refresh  a <index>=approve all  q=quit");
+        println!();
+
         let sessions = store::list_sessions_for_repo(&root)?;
-        if cursor_idx >= sessions.len() && !sessions.is_empty() {
-            cursor_idx = sessions.len() - 1;
-        }
-        execute!(
-            stdout,
-            cursor::MoveTo(0, 0),
-            terminal::Clear(terminal::ClearType::All)
-        )
-        .map_err(|err| err.to_string())?;
-        writeln!(stdout, "vibe dashboard").map_err(|err| err.to_string())?;
-        writeln!(stdout, "up/down move  enter approve-all  q quit")
-            .map_err(|err| err.to_string())?;
-        writeln!(stdout).map_err(|err| err.to_string())?;
-        for (idx, session) in sessions.iter().enumerate() {
-            let mark = if idx == cursor_idx { ">" } else { " " };
-            let branch = session
-                .confirmed_branch
-                .as_deref()
-                .unwrap_or(&session.suggested_branch);
-            let ended = if session.ended_at.is_some() {
-                "ended".with(Color::Red)
-            } else {
-                "active".with(Color::Green)
-            };
-            writeln!(
-                stdout,
-                "{} {} [{}] {}",
-                mark,
-                session.id,
-                branch,
-                ended
-            )
-            .map_err(|err| err.to_string())?;
-            let drafts = store::list_drafts(&session.id)?;
-            for draft in drafts {
-                writeln!(stdout, "    - {}", draft.message).map_err(|err| err.to_string())?;
+        if sessions.is_empty() {
+            println!("(no sessions)");
+        } else {
+            for (idx, session) in sessions.iter().enumerate() {
+                let branch = session
+                    .confirmed_branch
+                    .as_deref()
+                    .unwrap_or(&session.suggested_branch);
+                let state = if session.ended_at.is_some() { "ended" } else { "active" };
+                println!("[{idx}] {} [{}] {state}", session.id, branch);
+                let drafts = store::list_drafts(&session.id)?;
+                for draft in drafts {
+                    println!("    - {}", draft.message);
+                }
+                println!();
             }
         }
-        if !status.is_empty() {
-            writeln!(stdout).map_err(|err| err.to_string())?;
-            writeln!(stdout, "{}", status.clone().with(Color::Yellow))
-                .map_err(|err| err.to_string())?;
-        }
-        stdout.flush().map_err(|err| err.to_string())?;
 
-        let evt = event::read().map_err(|err| err.to_string())?;
-        if let Event::Key(key) = evt {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Up => {
-                    cursor_idx = cursor_idx.saturating_sub(1);
+        print!("> ");
+        io::stdout().flush().map_err(|err| err.to_string())?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|err| err.to_string())?;
+        let trimmed = input.trim();
+        if trimmed.eq_ignore_ascii_case("q") {
+            break;
+        }
+        if trimmed.eq_ignore_ascii_case("r") || trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("a ") {
+            let idx = rest.trim().parse::<usize>().map_err(|_| "invalid index".to_string())?;
+            let session = sessions.get(idx).ok_or("session index out of range")?;
+            match daemon::approve_drafts(&session.id, None, None) {
+                Ok(commits) => {
+                    println!("approved {} commit(s)", commits.len());
                 }
-                KeyCode::Down => {
-                    if cursor_idx + 1 < sessions.len() {
-                        cursor_idx += 1;
-                    }
+                Err(err) => {
+                    println!("approve failed: {err}");
                 }
-                KeyCode::Enter => {
-                    if let Some(session) = sessions.get(cursor_idx) {
-                        match daemon::approve_drafts(&session.id, None, None) {
-                            Ok(commits) => {
-                                status = format!("approved {} commit(s)", commits.len());
-                            }
-                            Err(err) => status = err,
-                        }
-                    }
-                }
-                _ => {}
             }
+            println!("press enter to continue...");
+            let mut pause = String::new();
+            let _ = io::stdin().read_line(&mut pause);
+            continue;
         }
     }
+
     Ok(())
-}
-
-struct RawModeGuard;
-impl RawModeGuard {
-    fn new() -> Result<Self, String> {
-        terminal::enable_raw_mode().map_err(|err| err.to_string())?;
-        Ok(Self)
-    }
-}
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
-    }
 }

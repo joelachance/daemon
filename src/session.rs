@@ -16,18 +16,6 @@ pub struct ToolCall {
     pub timestamp: i64,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Turn {
-    pub id: String,
-    pub session_id: String,
-    pub prompt: String,
-    pub response: String,
-    pub tool_calls: Vec<ToolCall>,
-    pub change_ids: Vec<String>,
-    pub timestamp: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangeLineRange {
     pub old_start: i64,

@@ -63,8 +63,13 @@ pub fn run_daemon(_start_stdin: bool) -> Result<(), String> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(err) = handle_stream(stream) {
-                    eprintln!("daemon: {err}");
+                match handle_stream(stream) {
+                    Ok(should_continue) => {
+                        if !should_continue {
+                            break;
+                        }
+                    }
+                    Err(err) => eprintln!("daemon: {err}"),
                 }
             }
             Err(err) => eprintln!("daemon: {err}"),
@@ -200,19 +205,25 @@ pub fn send_event(
     }
 }
 
-fn handle_stream(mut stream: UnixStream) -> Result<(), String> {
+fn handle_stream(mut stream: UnixStream) -> Result<bool, String> {
     let mut buffer = String::new();
     stream
         .read_to_string(&mut buffer)
         .map_err(|err| err.to_string())?;
     if buffer.trim().is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     let request: Request = serde_json::from_str(&buffer).map_err(|err| err.to_string())?;
+    let should_continue = request.kind.as_str() != "stop";
     let response = match request.kind.as_str() {
         "event" => handle_event(&request),
         "ping" | "end_all" => Ok(EventResult {
             message: "ok".to_string(),
+            summary: None,
+            staged_paths: Vec::new(),
+        }),
+        "stop" => Ok(EventResult {
+            message: "stopping".to_string(),
             summary: None,
             staged_paths: Vec::new(),
         }),
@@ -240,7 +251,7 @@ fn handle_stream(mut stream: UnixStream) -> Result<(), String> {
     };
     let response_json = serde_json::to_vec(&response).map_err(|err| err.to_string())?;
     stream.write_all(&response_json).map_err(|err| err.to_string())?;
-    Ok(())
+    Ok(should_continue)
 }
 
 fn handle_event(request: &Request) -> Result<EventResult, String> {
@@ -382,12 +393,11 @@ pub fn ensure_daemon_running() -> Result<(), String> {
     Err("daemon failed to start".to_string())
 }
 
-#[allow(dead_code)]
-pub fn end_all_sessions() -> Result<(), String> {
+pub fn stop_daemon() -> Result<(), String> {
     let socket = socket_path();
     let mut stream = UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;
     let request = Request {
-        kind: "end_all".to_string(),
+        kind: "stop".to_string(),
         session_id: None,
         summary: None,
         paths: None,

@@ -3,7 +3,7 @@ use crate::status;
 use crate::store;
 use std::io::{self, Write};
 
-const COMMANDS: &[&str] = &["start", "status", "ticket"];
+const COMMANDS: &[&str] = &["start", "stop", "status", "ticket"];
 
 pub fn is_help(arg: &str) -> bool {
     matches!(arg, "-h" | "--help")
@@ -16,6 +16,7 @@ pub fn is_command(arg: &str) -> bool {
 pub fn run_command(command: &str, _args: &[String]) -> Result<(), String> {
     match command {
         "start" => run_start_command(),
+        "stop" => run_stop_command(),
         "status" => run_status_command(),
         "ticket" => run_ticket_command(_args),
         _ => Err(format!("unsupported command: {command}")),
@@ -42,18 +43,21 @@ pub fn print_help() {
 Usage:\n\
   gg\n\
   gg start\n\
+  gg stop\n\
   gg status\n\
   gg ticket <session-id> <ticket>\n\
   gg -h | --help\n\
 \n\
 Behavior:\n\
   - start daemon + dashboard\n\
+  - stop stops daemon process\n\
   - status opens draft review view\n\
   - ticket updates ticket for session\n\
 \n\
 Examples:\n\
   gg\n\
   gg start\n\
+  gg stop\n\
   gg status\n\
   gg ticket ses_123 456\n\
 "
@@ -67,6 +71,12 @@ fn run_start_command() -> Result<(), String> {
 
 fn run_status_command() -> Result<(), String> {
     status::run_status_ui()
+}
+
+fn run_stop_command() -> Result<(), String> {
+    daemon::stop_daemon()?;
+    println!("daemon stopped");
+    Ok(())
 }
 
 fn run_ticket_command(args: &[String]) -> Result<(), String> {

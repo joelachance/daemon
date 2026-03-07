@@ -1,5 +1,6 @@
 use crate::daemon;
 use crate::git;
+use crate::session_row;
 use crate::store;
 use std::io::{self, Write};
 
@@ -12,18 +13,23 @@ pub fn run_dashboard() -> Result<(), String> {
         println!("vibe dashboard");
         println!("commands: r=refresh  a <index>=approve all  q=quit");
         println!();
+        let width = std::env::var("COLUMNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(120);
 
         let sessions = store::list_sessions_for_repo(&root)?;
         if sessions.is_empty() {
             println!("(no sessions)");
         } else {
             for (idx, session) in sessions.iter().enumerate() {
-                let branch = session
-                    .confirmed_branch
-                    .as_deref()
-                    .unwrap_or(&session.suggested_branch);
-                let state = if session.ended_at.is_some() { "ended" } else { "active" };
-                println!("[{idx}] {} [{}] {state}", session.id, branch);
+                let state = if session.ended_at.is_some() {
+                    "ended"
+                } else {
+                    "active"
+                };
+                let row = session_row::format_session_columns(session, width, Some(idx));
+                println!("{row}  {state}");
                 let drafts = store::list_drafts(&session.id)?;
                 for draft in drafts {
                     println!("    - {}", draft.message);
@@ -46,7 +52,10 @@ pub fn run_dashboard() -> Result<(), String> {
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("a ") {
-            let idx = rest.trim().parse::<usize>().map_err(|_| "invalid index".to_string())?;
+            let idx = rest
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "invalid index".to_string())?;
             let session = sessions.get(idx).ok_or("session index out of range")?;
             match daemon::approve_drafts(&session.id, None, None) {
                 Ok(commits) => {

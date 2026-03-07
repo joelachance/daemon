@@ -1,18 +1,19 @@
 use std::env;
 use std::process;
 
-mod claude;
 mod api;
+mod claude;
 mod cli;
 mod cursor;
 mod daemon;
+mod dashboard;
 mod git;
 mod grouping;
 mod opencode;
 mod session;
+mod session_row;
 mod status;
 mod store;
-mod dashboard;
 
 fn main() {
     let mut args = env::args().skip(1);

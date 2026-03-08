@@ -456,96 +456,6 @@ pub fn list_sessions_for_repo(repo_path: &str) -> Result<Vec<SessionInfo>, Strin
     Ok(out)
 }
 
-pub fn list_active_sessions_for_repo(
-    repo_path: &str,
-    now_ts: i64,
-    window_secs: i64,
-) -> Result<Vec<SessionInfo>, String> {
-    let conn = open()?;
-    let cutoff = now_ts.saturating_sub(window_secs);
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, ide, repo_path, base_commit_sha, suggested_branch, confirmed_branch, ticket, started_at, ended_at, last_seen_at, source_status
-             FROM sessions
-             WHERE repo_path = ?1
-             ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![repo_path], |row| {
-            Ok(SessionInfo {
-                id: row.get(0)?,
-                ide: row.get(1)?,
-                repo_path: row.get(2)?,
-                base_commit_sha: row.get(3)?,
-                suggested_branch: row.get(4)?,
-                confirmed_branch: row.get(5)?,
-                ticket: normalize_optional(row.get::<usize, Option<String>>(6)?),
-                started_at: row.get(7)?,
-                ended_at: row.get(8)?,
-                last_seen_at: row.get(9)?,
-                source_status: normalize_optional(row.get::<usize, Option<String>>(10)?),
-            })
-        })
-        .map_err(|err| err.to_string())?;
-    let source_filter = session_sources_filter();
-    let mut out = Vec::new();
-    for row in rows {
-        let session = row.map_err(|err| err.to_string())?;
-        if !matches_source_filter(&session.ide, source_filter.as_ref()) {
-            continue;
-        }
-        let seen_at = session.last_seen_at.unwrap_or(session.started_at);
-        let recent = seen_at >= cutoff;
-        let non_terminal = status_is_non_terminal(session.source_status.as_deref());
-        if recent || non_terminal {
-            out.push(session);
-        }
-    }
-    Ok(out)
-}
-
-pub fn list_active_cursor_sessions_for_repo(
-    repo_path: &str,
-    now_ts: i64,
-    window_secs: i64,
-) -> Result<Vec<SessionInfo>, String> {
-    let conn = open()?;
-    let cutoff = now_ts.saturating_sub(window_secs);
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, ide, repo_path, base_commit_sha, suggested_branch, confirmed_branch, ticket, started_at, ended_at, last_seen_at, source_status
-             FROM sessions
-             WHERE repo_path = ?1
-               AND lower(ide) = 'cursor'
-               AND COALESCE(last_seen_at, started_at) >= ?2
-             ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![repo_path, cutoff], |row| {
-            Ok(SessionInfo {
-                id: row.get(0)?,
-                ide: row.get(1)?,
-                repo_path: row.get(2)?,
-                base_commit_sha: row.get(3)?,
-                suggested_branch: row.get(4)?,
-                confirmed_branch: row.get(5)?,
-                ticket: normalize_optional(row.get::<usize, Option<String>>(6)?),
-                started_at: row.get(7)?,
-                ended_at: row.get(8)?,
-                last_seen_at: row.get(9)?,
-                source_status: normalize_optional(row.get::<usize, Option<String>>(10)?),
-            })
-        })
-        .map_err(|err| err.to_string())?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|err| err.to_string())?);
-    }
-    Ok(out)
-}
-
 pub fn list_active_cursor_sessions(
     now_ts: i64,
     window_secs: i64,
@@ -583,16 +493,6 @@ pub fn list_active_cursor_sessions(
         out.push(row.map_err(|err| err.to_string())?);
     }
     Ok(out)
-}
-
-pub fn count_sessions_for_repo(repo_path: &str) -> Result<i64, String> {
-    let conn = open()?;
-    conn.query_row(
-        "SELECT COUNT(*) FROM sessions WHERE repo_path = ?1",
-        params![repo_path],
-        |row| row.get::<usize, i64>(0),
-    )
-    .map_err(|err| err.to_string())
 }
 
 pub fn get_session(session_id: &str) -> Result<Option<SessionInfo>, String> {
@@ -654,59 +554,6 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
             Some(item)
         }
     })
-}
-
-fn session_sources_filter() -> Option<Vec<String>> {
-    let raw = env::var("GG_SESSION_SOURCES").ok()?;
-    let values: Vec<String> = raw
-        .split(',')
-        .map(|item| item.trim().to_ascii_lowercase())
-        .filter(|item| !item.is_empty())
-        .collect();
-    if values.is_empty() {
-        None
-    } else {
-        Some(values)
-    }
-}
-
-fn matches_source_filter(source: &str, filter: Option<&Vec<String>>) -> bool {
-    match filter {
-        Some(values) => values.contains(&source.trim().to_ascii_lowercase()),
-        None => true,
-    }
-}
-
-fn status_is_non_terminal(status: Option<&str>) -> bool {
-    let Some(status) = status else {
-        return false;
-    };
-    let normalized = normalize_status_token(status);
-    if normalized.is_empty() {
-        return false;
-    }
-    !matches!(
-        normalized.as_str(),
-        "completed"
-            | "done"
-            | "ended"
-            | "inactive"
-            | "archived"
-            | "stopped"
-            | "timeout"
-            | "timedout"
-            | "cancelled"
-            | "canceled"
-            | "failed"
-            | "error"
-    )
-}
-
-fn normalize_status_token(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace([' ', '-', '_'], "")
 }
 
 fn now_ts() -> i64 {

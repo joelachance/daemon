@@ -1,5 +1,6 @@
 use crate::daemon;
 use crate::session::TokenUsage;
+use crate::store;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -9,6 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use sysinfo::System;
+use time::OffsetDateTime;
 
 const DEFAULT_GLOBAL_DB: &str =
     "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb";
@@ -52,10 +54,16 @@ struct CursorState {
 pub fn cursor_running() -> bool {
     let mut system = System::new_all();
     system.refresh_processes();
-    system
-        .processes()
-        .values()
-        .any(|process| process.name().contains("Cursor"))
+    system.processes().values().any(|process| {
+        let name = process.name().to_ascii_lowercase();
+        if name.contains("cursor") {
+            return true;
+        }
+        process
+            .cmd()
+            .iter()
+            .any(|part| part.to_ascii_lowercase().contains("cursor"))
+    })
 }
 
 pub fn poll_completed_sessions(
@@ -69,21 +77,15 @@ pub fn poll_completed_sessions(
     let fetch = fetch_sessions_for_repo(&conn, &root)?;
     let sessions = fetch.sessions;
     let mut emitted = 0usize;
-    if debug_enabled() {
-        eprintln!(
-            "cursor poll: workspace_candidates={} hydrated_found={} hydrated_missing={} fallback_used={} scanned={} matched={} rejected={}",
-            fetch.workspace_candidates,
-            fetch.hydrated_found,
-            fetch.hydrated_missing,
-            fetch.fallback_used,
-            fetch.scanned,
-            sessions.len(),
-            fetch.rejected
-        );
-    }
 
     for session in sessions {
         let session_id = session.composer_id.clone();
+        daemon::upsert_session_presence(&session_id, "cursor", &root, None)?;
+        store::set_session_source_status(&session_id, Some(&session.status))?;
+        let seen_at = session
+            .last_updated_at
+            .unwrap_or_else(|| OffsetDateTime::now_utc().unix_timestamp());
+        store::touch_session(&session_id, seen_at)?;
         let mut last_prompt: Option<PromptSnapshot> = None;
         let new_bubbles = bubbles_after(
             state.last_bubble.get(&session_id).map(String::as_str),
@@ -266,10 +268,6 @@ pub fn poll_completed_sessions(
         }
 
         save_state(&root, &state)?;
-    }
-
-    if debug_enabled() {
-        eprintln!("cursor poll: emitted_events={emitted}");
     }
 
     Ok(emitted)
@@ -678,19 +676,6 @@ fn workspace_storage_root() -> Result<PathBuf, String> {
         .join("Cursor")
         .join("User")
         .join("workspaceStorage"))
-}
-
-fn debug_enabled() -> bool {
-    match env::var("GG_CURSOR_DEBUG")
-        .ok()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "1" | "true" | "yes" | "on" => true,
-        _ => false,
-    }
 }
 
 fn session_matches_repo(json: &Value, raw: &str, repo_norm: &str) -> bool {

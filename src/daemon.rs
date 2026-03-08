@@ -62,16 +62,14 @@ pub fn run_daemon(_start_stdin: bool) -> Result<(), String> {
     start_opencode_poll_thread();
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
-                match handle_stream(stream) {
-                    Ok(should_continue) => {
-                        if !should_continue {
-                            break;
-                        }
+            Ok(stream) => match handle_stream(stream) {
+                Ok(should_continue) => {
+                    if !should_continue {
+                        break;
                     }
-                    Err(err) => eprintln!("daemon: {err}"),
                 }
-            }
+                Err(err) => eprintln!("daemon: {err}"),
+            },
             Err(err) => eprintln!("daemon: {err}"),
         }
     }
@@ -120,7 +118,8 @@ fn start_claude_poll_thread() {
         if let Some(root) = root {
             let git_stdout = parse_bool_env("GG_GIT_STDOUT").unwrap_or(false);
             let compact = parse_bool_env("GG_COMPACT").unwrap_or(false);
-            if let Err(err) = claude::poll_assistant_responses(Path::new(&root), git_stdout, compact)
+            if let Err(err) =
+                claude::poll_assistant_responses(Path::new(&root), git_stdout, compact)
             {
                 eprintln!("daemon: claude poll error: {err}");
             }
@@ -144,7 +143,8 @@ fn start_opencode_poll_thread() {
         if let Some(root) = root {
             let git_stdout = parse_bool_env("GG_GIT_STDOUT").unwrap_or(false);
             let compact = parse_bool_env("GG_COMPACT").unwrap_or(false);
-            if let Err(err) = opencode::poll_assistant_messages(Path::new(&root), git_stdout, compact)
+            if let Err(err) =
+                opencode::poll_assistant_messages(Path::new(&root), git_stdout, compact)
             {
                 eprintln!("daemon: opencode poll error: {err}");
             }
@@ -196,9 +196,7 @@ pub fn send_event(
         .map_err(|err| err.to_string())?;
     let response: Response = serde_json::from_str(&response_buf).map_err(|err| err.to_string())?;
     if response.ok {
-        if !compact {
-            println!("{}", response.message);
-        }
+        let _ = compact;
         Ok(())
     } else {
         Err(response.message)
@@ -250,16 +248,15 @@ fn handle_stream(mut stream: UnixStream) -> Result<bool, String> {
         },
     };
     let response_json = serde_json::to_vec(&response).map_err(|err| err.to_string())?;
-    stream.write_all(&response_json).map_err(|err| err.to_string())?;
+    stream
+        .write_all(&response_json)
+        .map_err(|err| err.to_string())?;
     Ok(should_continue)
 }
 
 fn handle_event(request: &Request) -> Result<EventResult, String> {
     let session_id = request.session_id.as_ref().ok_or("missing session_id")?;
-    let cwd = request
-        .cwd
-        .clone()
-        .unwrap_or_else(|| ".".to_string());
+    let cwd = request.cwd.clone().unwrap_or_else(|| ".".to_string());
     let root = git::repo_root_from(&cwd).or_else(|_| git::repo_root())?;
     let base_commit_sha = git::head_commit_in_root(&root)?;
     let meta = request.meta.as_ref();
@@ -267,14 +264,12 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
         .and_then(|value| value.get("source"))
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
-    let prompt = meta
-        .and_then(extract_prompt_text)
-        .unwrap_or_default();
+    let prompt = meta.and_then(extract_prompt_text).unwrap_or_default();
     let response = meta
         .and_then(extract_response_text)
         .or_else(|| request.summary.clone())
         .unwrap_or_else(|| "assistant response".to_string());
-    let suggested = suggest_branch_name(&prompt);
+    let suggested = suggest_branch_name_for_session(&prompt, session_id);
     store::upsert_session(
         session_id,
         ide,
@@ -287,11 +282,24 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
             Some(prompt.as_str())
         },
     )?;
+    store::touch_session(session_id, OffsetDateTime::now_utc().unix_timestamp())?;
+    if let Some(status) = meta
+        .and_then(|value| value.get("status"))
+        .and_then(|value| value.as_str())
+    {
+        store::set_session_source_status(session_id, Some(status))?;
+    }
     let turn_id = stable_id(&format!(
         "{session_id}:{}:{response}",
         OffsetDateTime::now_utc().unix_timestamp()
     ));
-    store::insert_turn(&turn_id, session_id, &prompt, &response, &Vec::<ToolCall>::new())?;
+    store::insert_turn(
+        &turn_id,
+        session_id,
+        &prompt,
+        &response,
+        &Vec::<ToolCall>::new(),
+    )?;
     let changes = capture_changes_for_turn(&root, session_id, &turn_id, &base_commit_sha)?;
     if !changes.is_empty() {
         assign_changes_to_draft(session_id, &prompt, &changes)?;
@@ -302,6 +310,7 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
         .unwrap_or(false)
     {
         store::mark_session_ended(session_id)?;
+        store::set_session_source_status(session_id, Some("ended"))?;
     }
     let changed_paths = changes.into_iter().map(|item| item.file_path).collect();
     Ok(EventResult {
@@ -309,6 +318,35 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
         summary: Some("captured".to_string()),
         staged_paths: changed_paths,
     })
+}
+
+pub fn upsert_session_presence(
+    session_id: &str,
+    ide: &str,
+    repo_root: &Path,
+    prompt_hint: Option<&str>,
+) -> Result<(), String> {
+    let repo = repo_root
+        .canonicalize()
+        .map_err(|err| err.to_string())?
+        .to_string_lossy()
+        .to_string();
+    let base_commit_sha = git::head_commit_in_root(&repo)?;
+    let prompt = prompt_hint.unwrap_or_default();
+    let suggested = suggest_branch_name_for_session(prompt, session_id);
+    let first_prompt = if prompt.trim().is_empty() {
+        None
+    } else {
+        Some(prompt)
+    };
+    store::upsert_session(
+        session_id,
+        ide,
+        &repo,
+        &base_commit_sha,
+        &suggested,
+        first_prompt,
+    )
 }
 
 pub fn approve_drafts(
@@ -460,7 +498,20 @@ fn extract_response_text(meta: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn suggest_branch_name(prompt: &str) -> String {
+pub fn placeholder_branch_name(session_id: &str) -> String {
+    let short = session_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>();
+    if short.is_empty() {
+        "feature/session".to_string()
+    } else {
+        format!("feature/session-{short}")
+    }
+}
+
+fn suggest_branch_name_for_session(prompt: &str, session_id: &str) -> String {
     let slug = prompt
         .to_ascii_lowercase()
         .chars()
@@ -470,11 +521,10 @@ fn suggest_branch_name(prompt: &str) -> String {
         .filter(|piece| !piece.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    let slug = if slug.is_empty() {
-        "session".to_string()
-    } else {
-        slug.chars().take(40).collect::<String>()
-    };
+    if slug.is_empty() {
+        return placeholder_branch_name(session_id);
+    }
+    let slug = slug.chars().take(40).collect::<String>();
     format!("feature/{slug}")
 }
 
@@ -499,7 +549,10 @@ fn capture_changes_for_turn(
         if prev_blocks.contains(&block.raw) {
             continue;
         }
-        let id = stable_id(&format!("{}:{}:{}", block.file_path, block.raw, base_commit_sha));
+        let id = stable_id(&format!(
+            "{}:{}:{}",
+            block.file_path, block.raw, base_commit_sha
+        ));
         let change = Change {
             id,
             session_id: session_id.to_string(),
@@ -523,7 +576,11 @@ fn capture_changes_for_turn(
     Ok(out)
 }
 
-fn assign_changes_to_draft(session_id: &str, prompt: &str, changes: &[Change]) -> Result<(), String> {
+fn assign_changes_to_draft(
+    session_id: &str,
+    prompt: &str,
+    changes: &[Change],
+) -> Result<(), String> {
     let lockfiles = [
         "package-lock.json",
         "yarn.lock",
@@ -537,7 +594,10 @@ fn assign_changes_to_draft(session_id: &str, prompt: &str, changes: &[Change]) -
     let mut normal = Vec::new();
     let mut lock = Vec::new();
     for change in changes {
-        if lockfiles.iter().any(|name| change.file_path.ends_with(name)) {
+        if lockfiles
+            .iter()
+            .any(|name| change.file_path.ends_with(name))
+        {
             lock.push(change.clone());
         } else {
             normal.push(change.clone());
@@ -701,7 +761,7 @@ mod tests {
 
     #[test]
     fn branch_slug_fallback() {
-        let name = suggest_branch_name("");
-        assert_eq!(name, "feature/session");
+        let name = suggest_branch_name_for_session("", "8f1ef5e3-0954-4a29-8c4a-3d520ce78647");
+        assert_eq!(name, "feature/session-8f1ef5e3");
     }
 }

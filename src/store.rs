@@ -17,6 +17,8 @@ pub struct SessionInfo {
     pub ticket: Option<String>,
     pub started_at: i64,
     pub ended_at: Option<i64>,
+    pub last_seen_at: Option<i64>,
+    pub source_status: Option<String>,
 }
 
 pub fn init() -> Result<(), String> {
@@ -35,6 +37,8 @@ pub fn init() -> Result<(), String> {
             ticket TEXT,
             first_prompt TEXT,
             diff_snapshot_u0 TEXT NOT NULL DEFAULT '',
+            last_seen_at INTEGER,
+            source_status TEXT,
             started_at INTEGER NOT NULL,
             ended_at INTEGER
         );
@@ -82,6 +86,7 @@ pub fn init() -> Result<(), String> {
         "#,
     )
     .map_err(|err| err.to_string())?;
+    ensure_sessions_columns(&conn)?;
     Ok(())
 }
 
@@ -122,7 +127,8 @@ pub fn upsert_session(
             repo_path = excluded.repo_path,
             base_commit_sha = excluded.base_commit_sha,
             suggested_branch = excluded.suggested_branch,
-            first_prompt = COALESCE(sessions.first_prompt, excluded.first_prompt)",
+            first_prompt = COALESCE(sessions.first_prompt, excluded.first_prompt),
+            last_seen_at = ?8",
         params![
             session_id,
             ide,
@@ -130,8 +136,29 @@ pub fn upsert_session(
             base_commit_sha,
             suggested_branch,
             first_prompt.unwrap_or(""),
+            now,
             now
         ],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+pub fn touch_session(session_id: &str, seen_at: i64) -> Result<(), String> {
+    let conn = open()?;
+    conn.execute(
+        "UPDATE sessions SET last_seen_at = ?2 WHERE id = ?1",
+        params![session_id, seen_at],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+pub fn set_session_source_status(session_id: &str, status: Option<&str>) -> Result<(), String> {
+    let conn = open()?;
+    conn.execute(
+        "UPDATE sessions SET source_status = ?2 WHERE id = ?1",
+        params![session_id, normalize_optional(status.map(str::to_string))],
     )
     .map_err(|err| err.to_string())?;
     Ok(())
@@ -305,9 +332,7 @@ pub fn list_drafts(session_id: &str) -> Result<Vec<DraftCommit>, String> {
 pub fn draft_change_ids(draft_id: &str) -> Result<Vec<String>, String> {
     let conn = open()?;
     let mut stmt = conn
-        .prepare(
-            "SELECT change_id FROM draft_changes WHERE draft_id = ?1 ORDER BY item_order ASC",
-        )
+        .prepare("SELECT change_id FROM draft_changes WHERE draft_id = ?1 ORDER BY item_order ASC")
         .map_err(|err| err.to_string())?;
     let rows = stmt
         .query_map(params![draft_id], |row| row.get::<usize, String>(0))
@@ -419,6 +444,8 @@ pub fn list_sessions_for_repo(repo_path: &str) -> Result<Vec<SessionInfo>, Strin
                 ticket: normalize_optional(row.get::<usize, Option<String>>(6)?),
                 started_at: row.get(7)?,
                 ended_at: row.get(8)?,
+                last_seen_at: None,
+                source_status: None,
             })
         })
         .map_err(|err| err.to_string())?;
@@ -427,6 +454,145 @@ pub fn list_sessions_for_repo(repo_path: &str) -> Result<Vec<SessionInfo>, Strin
         out.push(row.map_err(|err| err.to_string())?);
     }
     Ok(out)
+}
+
+pub fn list_active_sessions_for_repo(
+    repo_path: &str,
+    now_ts: i64,
+    window_secs: i64,
+) -> Result<Vec<SessionInfo>, String> {
+    let conn = open()?;
+    let cutoff = now_ts.saturating_sub(window_secs);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, ide, repo_path, base_commit_sha, suggested_branch, confirmed_branch, ticket, started_at, ended_at, last_seen_at, source_status
+             FROM sessions
+             WHERE repo_path = ?1
+             ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map(params![repo_path], |row| {
+            Ok(SessionInfo {
+                id: row.get(0)?,
+                ide: row.get(1)?,
+                repo_path: row.get(2)?,
+                base_commit_sha: row.get(3)?,
+                suggested_branch: row.get(4)?,
+                confirmed_branch: row.get(5)?,
+                ticket: normalize_optional(row.get::<usize, Option<String>>(6)?),
+                started_at: row.get(7)?,
+                ended_at: row.get(8)?,
+                last_seen_at: row.get(9)?,
+                source_status: normalize_optional(row.get::<usize, Option<String>>(10)?),
+            })
+        })
+        .map_err(|err| err.to_string())?;
+    let source_filter = session_sources_filter();
+    let mut out = Vec::new();
+    for row in rows {
+        let session = row.map_err(|err| err.to_string())?;
+        if !matches_source_filter(&session.ide, source_filter.as_ref()) {
+            continue;
+        }
+        let seen_at = session.last_seen_at.unwrap_or(session.started_at);
+        let recent = seen_at >= cutoff;
+        let non_terminal = status_is_non_terminal(session.source_status.as_deref());
+        if recent || non_terminal {
+            out.push(session);
+        }
+    }
+    Ok(out)
+}
+
+pub fn list_active_cursor_sessions_for_repo(
+    repo_path: &str,
+    now_ts: i64,
+    window_secs: i64,
+) -> Result<Vec<SessionInfo>, String> {
+    let conn = open()?;
+    let cutoff = now_ts.saturating_sub(window_secs);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, ide, repo_path, base_commit_sha, suggested_branch, confirmed_branch, ticket, started_at, ended_at, last_seen_at, source_status
+             FROM sessions
+             WHERE repo_path = ?1
+               AND lower(ide) = 'cursor'
+               AND COALESCE(last_seen_at, started_at) >= ?2
+             ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map(params![repo_path, cutoff], |row| {
+            Ok(SessionInfo {
+                id: row.get(0)?,
+                ide: row.get(1)?,
+                repo_path: row.get(2)?,
+                base_commit_sha: row.get(3)?,
+                suggested_branch: row.get(4)?,
+                confirmed_branch: row.get(5)?,
+                ticket: normalize_optional(row.get::<usize, Option<String>>(6)?),
+                started_at: row.get(7)?,
+                ended_at: row.get(8)?,
+                last_seen_at: row.get(9)?,
+                source_status: normalize_optional(row.get::<usize, Option<String>>(10)?),
+            })
+        })
+        .map_err(|err| err.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|err| err.to_string())?);
+    }
+    Ok(out)
+}
+
+pub fn list_active_cursor_sessions(
+    now_ts: i64,
+    window_secs: i64,
+) -> Result<Vec<SessionInfo>, String> {
+    let conn = open()?;
+    let cutoff = now_ts.saturating_sub(window_secs);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, ide, repo_path, base_commit_sha, suggested_branch, confirmed_branch, ticket, started_at, ended_at, last_seen_at, source_status
+             FROM sessions
+             WHERE lower(ide) = 'cursor'
+               AND COALESCE(last_seen_at, started_at) >= ?1
+             ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map(params![cutoff], |row| {
+            Ok(SessionInfo {
+                id: row.get(0)?,
+                ide: row.get(1)?,
+                repo_path: row.get(2)?,
+                base_commit_sha: row.get(3)?,
+                suggested_branch: row.get(4)?,
+                confirmed_branch: row.get(5)?,
+                ticket: normalize_optional(row.get::<usize, Option<String>>(6)?),
+                started_at: row.get(7)?,
+                ended_at: row.get(8)?,
+                last_seen_at: row.get(9)?,
+                source_status: normalize_optional(row.get::<usize, Option<String>>(10)?),
+            })
+        })
+        .map_err(|err| err.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|err| err.to_string())?);
+    }
+    Ok(out)
+}
+
+pub fn count_sessions_for_repo(repo_path: &str) -> Result<i64, String> {
+    let conn = open()?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM sessions WHERE repo_path = ?1",
+        params![repo_path],
+        |row| row.get::<usize, i64>(0),
+    )
+    .map_err(|err| err.to_string())
 }
 
 pub fn get_session(session_id: &str) -> Result<Option<SessionInfo>, String> {
@@ -449,6 +615,8 @@ pub fn get_session(session_id: &str) -> Result<Option<SessionInfo>, String> {
                 ticket: normalize_optional(row.get::<usize, Option<String>>(6)?),
                 started_at: row.get(7)?,
                 ended_at: row.get(8)?,
+                last_seen_at: None,
+                source_status: None,
             })
         })
         .optional()
@@ -488,6 +656,92 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+fn session_sources_filter() -> Option<Vec<String>> {
+    let raw = env::var("GG_SESSION_SOURCES").ok()?;
+    let values: Vec<String> = raw
+        .split(',')
+        .map(|item| item.trim().to_ascii_lowercase())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+fn matches_source_filter(source: &str, filter: Option<&Vec<String>>) -> bool {
+    match filter {
+        Some(values) => values.contains(&source.trim().to_ascii_lowercase()),
+        None => true,
+    }
+}
+
+fn status_is_non_terminal(status: Option<&str>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+    let normalized = normalize_status_token(status);
+    if normalized.is_empty() {
+        return false;
+    }
+    !matches!(
+        normalized.as_str(),
+        "completed"
+            | "done"
+            | "ended"
+            | "inactive"
+            | "archived"
+            | "stopped"
+            | "timeout"
+            | "timedout"
+            | "cancelled"
+            | "canceled"
+            | "failed"
+            | "error"
+    )
+}
+
+fn normalize_status_token(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "")
+}
+
 fn now_ts() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
+}
+
+fn ensure_sessions_columns(conn: &Connection) -> Result<(), String> {
+    ensure_column(
+        conn,
+        "sessions",
+        "last_seen_at",
+        "ALTER TABLE sessions ADD COLUMN last_seen_at INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "sessions",
+        "source_status",
+        "ALTER TABLE sessions ADD COLUMN source_status TEXT",
+    )?;
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, sql: &str) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<usize, String>(1))
+        .map_err(|err| err.to_string())?;
+    for row in rows {
+        let name = row.map_err(|err| err.to_string())?;
+        if name == column {
+            return Ok(());
+        }
+    }
+    conn.execute(sql, []).map_err(|err| err.to_string())?;
+    Ok(())
 }

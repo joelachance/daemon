@@ -1,5 +1,6 @@
 use crate::daemon;
 use crate::session::TokenUsage;
+use crate::store;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -7,6 +8,8 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+use time::OffsetDateTime;
 
 const DEFAULT_CLAUDE_DIR: &str = ".claude";
 
@@ -29,6 +32,8 @@ pub fn poll_assistant_responses(
 
     let mut state = load_state(&root);
     let mut emitted = 0usize;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let active_window_secs = active_window_secs();
 
     let entries = fs::read_dir(&project_dir).map_err(|err| err.to_string())?;
     for entry in entries {
@@ -42,6 +47,19 @@ pub fn poll_assistant_responses(
             Some(value) if !value.trim().is_empty() => value.to_string(),
             _ => continue,
         };
+        let is_recent = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|dur| dur.as_secs() as i64 >= now - active_window_secs)
+            .unwrap_or(false);
+        if !is_recent {
+            continue;
+        }
+
+        daemon::upsert_session_presence(&session_id, "claude", &root, None)?;
+        store::touch_session(&session_id, now)?;
 
         let count =
             process_session_file(&root, &path, &session_id, &mut state, git_stdout, compact)?;
@@ -51,6 +69,14 @@ pub fn poll_assistant_responses(
     save_state(&root, &state)?;
 
     Ok(emitted)
+}
+
+fn active_window_secs() -> i64 {
+    env::var("GG_ACTIVE_WINDOW_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(900)
 }
 
 fn claude_projects_dir() -> Result<PathBuf, String> {

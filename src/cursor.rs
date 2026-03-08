@@ -1,14 +1,16 @@
 use crate::daemon;
 use crate::session::TokenUsage;
+use crate::store;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use sysinfo::System;
+use time::OffsetDateTime;
 
 const DEFAULT_GLOBAL_DB: &str =
     "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb";
@@ -30,6 +32,17 @@ struct CursorSession {
     attached_files: Vec<String>,
 }
 
+#[derive(Debug, Default)]
+struct CursorFetchResult {
+    sessions: Vec<CursorSession>,
+    scanned: usize,
+    rejected: usize,
+    workspace_candidates: usize,
+    hydrated_found: usize,
+    hydrated_missing: usize,
+    fallback_used: bool,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CursorState {
     #[serde(default)]
@@ -41,10 +54,16 @@ struct CursorState {
 pub fn cursor_running() -> bool {
     let mut system = System::new_all();
     system.refresh_processes();
-    system
-        .processes()
-        .values()
-        .any(|process| process.name().contains("Cursor"))
+    system.processes().values().any(|process| {
+        let name = process.name().to_ascii_lowercase();
+        if name.contains("cursor") {
+            return true;
+        }
+        process
+            .cmd()
+            .iter()
+            .any(|part| part.to_ascii_lowercase().contains("cursor"))
+    })
 }
 
 pub fn poll_completed_sessions(
@@ -55,11 +74,18 @@ pub fn poll_completed_sessions(
     let root = root.canonicalize().map_err(|err| err.to_string())?;
     let mut state = load_state(&root);
     let conn = open_cursor_db()?;
-    let sessions = fetch_sessions_for_repo(&conn, &root)?;
+    let fetch = fetch_sessions_for_repo(&conn, &root)?;
+    let sessions = fetch.sessions;
     let mut emitted = 0usize;
 
     for session in sessions {
         let session_id = session.composer_id.clone();
+        daemon::upsert_session_presence(&session_id, "cursor", &root, None)?;
+        store::set_session_source_status(&session_id, Some(&session.status))?;
+        let seen_at = session
+            .last_updated_at
+            .unwrap_or_else(|| OffsetDateTime::now_utc().unix_timestamp());
+        store::touch_session(&session_id, seen_at)?;
         let mut last_prompt: Option<PromptSnapshot> = None;
         let new_bubbles = bubbles_after(
             state.last_bubble.get(&session_id).map(String::as_str),
@@ -270,16 +296,77 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn fetch_sessions_for_repo(conn: &Connection, root: &Path) -> Result<Vec<CursorSession>, String> {
+fn fetch_sessions_for_repo(conn: &Connection, root: &Path) -> Result<CursorFetchResult, String> {
     let repo_str = root.to_string_lossy().to_string();
-    let repo_uri = format!("file://{repo_str}");
+    let repo_norm = normalize_path_like(&repo_str);
+    let workspace_ids = discover_workspace_composer_ids(root)?;
 
+    let mut result = CursorFetchResult::default();
+    result.workspace_candidates = workspace_ids.len();
+
+    if !workspace_ids.is_empty() {
+        hydrate_sessions_by_ids(conn, &workspace_ids, &mut result)?;
+        if !result.sessions.is_empty() {
+            return Ok(result);
+        }
+    }
+
+    result.fallback_used = true;
+    fetch_sessions_by_global_match(conn, &repo_norm, &mut result)?;
+    Ok(result)
+}
+
+fn hydrate_sessions_by_ids(
+    conn: &Connection,
+    composer_ids: &[String],
+    result: &mut CursorFetchResult,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("select cast(value as text) from cursorDiskKV where key = ?1")
+        .map_err(|err| err.to_string())?;
+
+    for composer_id in composer_ids {
+        result.scanned += 1;
+        let key = format!("composerData:{composer_id}");
+        let payload: Option<String> = stmt
+            .query_row([key], |row| row.get(0))
+            .optional()
+            .map_err(|err| err.to_string())?;
+        let payload = match payload {
+            Some(value) if !value.trim().is_empty() => value,
+            _ => {
+                result.hydrated_missing += 1;
+                result.rejected += 1;
+                continue;
+            }
+        };
+        let json: Value = match serde_json::from_str(&payload) {
+            Ok(value) => value,
+            Err(_) => {
+                result.hydrated_missing += 1;
+                result.rejected += 1;
+                continue;
+            }
+        };
+        result.hydrated_found += 1;
+        result
+            .sessions
+            .push(build_cursor_session(composer_id, &json));
+    }
+
+    Ok(())
+}
+
+fn fetch_sessions_by_global_match(
+    conn: &Connection,
+    repo_norm: &str,
+    result: &mut CursorFetchResult,
+) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
             "select key, cast(value as text) from cursorDiskKV where key like 'composerData:%'",
         )
         .map_err(|err| err.to_string())?;
-
     let rows = stmt
         .query_map([], |row| {
             let key: String = row.get(0)?;
@@ -288,72 +375,83 @@ fn fetch_sessions_for_repo(conn: &Connection, root: &Path) -> Result<Vec<CursorS
         })
         .map_err(|err| err.to_string())?;
 
-    let mut sessions = Vec::new();
     for row in rows {
         let (key, value) = row.map_err(|err| err.to_string())?;
+        result.scanned += 1;
         let value = match value {
             Some(value) => value,
-            None => continue,
+            None => {
+                result.rejected += 1;
+                continue;
+            }
         };
-        if !value.contains(&repo_str) && !value.contains(&repo_uri) {
-            continue;
-        }
-
         let composer_id = match key.split_once(':') {
             Some((_, id)) => id.to_string(),
-            None => continue,
+            None => {
+                result.rejected += 1;
+                continue;
+            }
         };
-
         let json: Value = match serde_json::from_str(&value) {
             Ok(value) => value,
-            Err(_) => continue,
+            Err(_) => {
+                result.rejected += 1;
+                continue;
+            }
         };
-
-        let status = json
-            .get("status")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        let bubble_ids = extract_bubble_ids(&json);
-        let session = CursorSession {
-            composer_id,
-            status,
-            last_updated_at: json.get("lastUpdatedAt").and_then(|v| v.as_i64()),
-            created_at: json.get("createdAt").and_then(|v| v.as_i64()),
-            name: json
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            subtitle: json
-                .get("subtitle")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            model_name: json
-                .get("modelConfig")
-                .and_then(|v| v.get("modelName"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            context_tokens_used: json.get("contextTokensUsed").and_then(|v| v.as_i64()),
-            context_token_limit: json.get("contextTokenLimit").and_then(|v| v.as_i64()),
-            is_archived: json.get("isArchived").and_then(|v| v.as_bool()),
-            bubble_count: Some(bubble_ids.len()),
-            bubble_ids,
-            attached_files: json
-                .get("allAttachedFileCodeChunksUris")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|value| value.as_str().map(str::to_string))
-                        .collect::<Vec<String>>()
-                })
-                .unwrap_or_default(),
-        };
-
-        sessions.push(session);
+        if !session_matches_repo(&json, &value, repo_norm) {
+            result.rejected += 1;
+            continue;
+        }
+        result
+            .sessions
+            .push(build_cursor_session(&composer_id, &json));
     }
 
-    Ok(sessions)
+    Ok(())
+}
+
+fn build_cursor_session(composer_id: &str, json: &Value) -> CursorSession {
+    let status = json
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let bubble_ids = extract_bubble_ids(json);
+
+    CursorSession {
+        composer_id: composer_id.to_string(),
+        status,
+        last_updated_at: json.get("lastUpdatedAt").and_then(|v| v.as_i64()),
+        created_at: json.get("createdAt").and_then(|v| v.as_i64()),
+        name: json
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        subtitle: json
+            .get("subtitle")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        model_name: json
+            .get("modelConfig")
+            .and_then(|v| v.get("modelName"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        context_tokens_used: json.get("contextTokensUsed").and_then(|v| v.as_i64()),
+        context_token_limit: json.get("contextTokenLimit").and_then(|v| v.as_i64()),
+        is_archived: json.get("isArchived").and_then(|v| v.as_bool()),
+        bubble_count: Some(bubble_ids.len()),
+        bubble_ids,
+        attached_files: json
+            .get("allAttachedFileCodeChunksUris")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default(),
+    }
 }
 
 fn fetch_bubble_json(
@@ -481,4 +579,181 @@ fn save_state(root: &Path, state: &CursorState) -> Result<(), String> {
     let path = state_path(root)?;
     let data = serde_json::to_string_pretty(state).map_err(|err| err.to_string())?;
     fs::write(path, data).map_err(|err| err.to_string())
+}
+
+fn discover_workspace_composer_ids(root: &Path) -> Result<Vec<String>, String> {
+    let workspace_root = workspace_storage_root()?;
+    let entries = match fs::read_dir(&workspace_root) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let repo_norm = normalize_path_like(&root.to_string_lossy());
+    let mut ids = HashSet::new();
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let ws_dir = entry.path();
+        let ws_json = ws_dir.join("workspace.json");
+        let ws_db = ws_dir.join("state.vscdb");
+        if !ws_json.exists() || !ws_db.exists() {
+            continue;
+        }
+
+        let workspace_folder = match fs::read_to_string(&ws_json)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|json| {
+                json.get("folder")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            }) {
+            Some(value) => value,
+            None => continue,
+        };
+        if normalize_path_like(&workspace_folder) != repo_norm {
+            continue;
+        }
+
+        let conn = match Connection::open_with_flags(&ws_db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let raw: Option<String> = conn
+            .query_row(
+                "select cast(value as text) from ItemTable where key = 'composer.composerData'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| err.to_string())?;
+        let raw = match raw {
+            Some(value) => value,
+            None => continue,
+        };
+        let json: Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let all = match json.get("allComposers").and_then(|v| v.as_array()) {
+            Some(value) => value,
+            None => continue,
+        };
+        for item in all {
+            if let Some(id) = item
+                .get("composerId")
+                .or_else(|| item.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                if !id.trim().is_empty() {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<String> = ids.into_iter().collect();
+    out.sort();
+    Ok(out)
+}
+
+fn workspace_storage_root() -> Result<PathBuf, String> {
+    if let Ok(value) = env::var("GG_CURSOR_WORKSPACE_STORAGE") {
+        if !value.trim().is_empty() {
+            return Ok(PathBuf::from(expand_tilde(&value)));
+        }
+    }
+    let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    Ok(PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("Cursor")
+        .join("User")
+        .join("workspaceStorage"))
+}
+
+fn session_matches_repo(json: &Value, raw: &str, repo_norm: &str) -> bool {
+    if repo_norm.is_empty() {
+        return false;
+    }
+    if string_matches_repo(raw, repo_norm) {
+        return true;
+    }
+    let mut candidates = Vec::new();
+    collect_json_strings(json, &mut candidates);
+    candidates
+        .iter()
+        .any(|candidate| string_matches_repo(candidate, repo_norm))
+}
+
+fn collect_json_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => {
+            if !text.trim().is_empty() {
+                out.push(text.to_string());
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_json_strings(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for value in map.values() {
+                collect_json_strings(value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn string_matches_repo(candidate: &str, repo_norm: &str) -> bool {
+    let normalized = normalize_path_like(candidate);
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized == repo_norm {
+        return true;
+    }
+    let prefix = format!("{repo_norm}/");
+    if normalized.starts_with(&prefix) {
+        return true;
+    }
+    let normalized_lower = normalized.to_ascii_lowercase();
+    let repo_lower = repo_norm.to_ascii_lowercase();
+    if normalized_lower == repo_lower {
+        return true;
+    }
+    let prefix_lower = format!("{repo_lower}/");
+    if normalized_lower.starts_with(&prefix_lower) {
+        return true;
+    }
+    false
+}
+
+fn normalize_path_like(value: &str) -> String {
+    let mut text = value.trim().to_string();
+    if text.is_empty() {
+        return String::new();
+    }
+    if let Some(stripped) = text.strip_prefix("file://") {
+        text = stripped.to_string();
+    }
+    if let Some((left, _)) = text.split_once('?') {
+        text = left.to_string();
+    }
+    if let Some((left, _)) = text.split_once('#') {
+        text = left.to_string();
+    }
+    text = text.replace("%20", " ").replace('\\', "/");
+    while text.ends_with('/') && text.len() > 1 {
+        text.pop();
+    }
+    text
 }

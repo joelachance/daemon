@@ -58,6 +58,7 @@ pub fn poll_assistant_messages(
     let root_str = root.to_string_lossy().to_string();
     let mut state = load_state(&root);
     let now = OffsetDateTime::now_utc().unix_timestamp();
+    let active_window_secs = active_window_secs();
     let timeout_secs = env::var("GG_OPENCODE_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
@@ -67,10 +68,17 @@ pub fn poll_assistant_messages(
         Some(conn) => conn,
         None => return Ok(0),
     };
-    let mut parts = fetch_assistant_parts_for_repo(&conn, &root_str)?;
+    let active_sessions =
+        fetch_recent_active_session_ids_for_repo(&conn, &root_str, now, active_window_secs)?;
+    for session_id in active_sessions {
+        daemon::upsert_session_presence(&session_id, "opencode", &root, None)?;
+    }
+    let cutoff = now.saturating_sub(active_window_secs);
+    let mut parts = fetch_assistant_parts_for_repo(&conn, &root_str, Some(cutoff))?;
     parts.sort_by_key(|part| part.part_time_created);
 
     let mut emitted = 0usize;
+    let mut state_dirty = false;
     for part in parts {
         let part_time = to_seconds(part.part_time_created);
         let last_seen = state.last_seen.get(&part.session_id).copied().unwrap_or(0);
@@ -121,7 +129,7 @@ pub fn poll_assistant_messages(
         state.last_seen.insert(part.session_id.clone(), part_time);
         state.explicit_end.remove(&part.session_id);
         state.soft_end.remove(&part.session_id);
-        save_state(&root, &state)?;
+        state_dirty = true;
         emitted += 1;
 
         if is_exit_prompt(part.prompt_text.as_deref())
@@ -149,7 +157,7 @@ pub fn poll_assistant_messages(
                 Some(root_str.clone()),
             )?;
             state.explicit_end.insert(part.session_id.clone(), true);
-            save_state(&root, &state)?;
+            state_dirty = true;
         }
     }
 
@@ -190,10 +198,14 @@ pub fn poll_assistant_messages(
                     Some(root_str.clone()),
                 )?;
                 state.soft_end.insert(session_id, true);
-                save_state(&root, &state)?;
+                state_dirty = true;
                 emitted += 1;
             }
         }
+    }
+
+    if state_dirty {
+        save_state(&root, &state)?;
     }
 
     Ok(emitted)
@@ -228,6 +240,7 @@ fn expand_tilde(path: &str) -> String {
 fn fetch_assistant_parts_for_repo(
     conn: &Connection,
     root: &str,
+    cutoff_secs: Option<i64>,
 ) -> Result<Vec<OpenCodeAssistantPart>, String> {
     let mut prompt_stmt = conn
         .prepare_cached(
@@ -272,6 +285,12 @@ fn fetch_assistant_parts_for_repo(
     let mut parts = Vec::new();
     for row in rows {
         let row = row.map_err(|err| err.to_string())?;
+        let part_time_seconds = to_seconds(row.part_time_created);
+        if let Some(cutoff) = cutoff_secs {
+            if part_time_seconds < cutoff {
+                continue;
+            }
+        }
         let message_json: Value = match serde_json::from_str(&row.message_data) {
             Ok(value) => value,
             Err(_) => continue,
@@ -314,6 +333,44 @@ fn fetch_assistant_parts_for_repo(
     }
 
     Ok(parts)
+}
+
+fn fetch_recent_active_session_ids_for_repo(
+    conn: &Connection,
+    root: &str,
+    now: i64,
+    active_window_secs: i64,
+) -> Result<Vec<String>, String> {
+    let cutoff = now - active_window_secs;
+    let mut stmt = conn
+        .prepare(
+            "select s.id, max(p.time_created) \
+             from session s \
+             join project pr on pr.id = s.project_id \
+             join message m on m.session_id = s.id \
+             join part p on p.message_id = m.id \
+             where s.directory = ?1 or pr.worktree = ?1 \
+               and json_extract(m.data, '$.role') = 'assistant' \
+               and json_extract(p.data, '$.type') = 'text' \
+             group by s.id",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([root], |row| {
+            let session_id: String = row.get(0)?;
+            let last_part: Option<i64> = row.get(1)?;
+            Ok((session_id, last_part))
+        })
+        .map_err(|err| err.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (session_id, last_part) = row.map_err(|err| err.to_string())?;
+        let seen_at = last_part.map(to_seconds).unwrap_or(0);
+        if seen_at >= cutoff {
+            out.push(session_id);
+        }
+    }
+    Ok(out)
 }
 
 fn parse_tokens(message_json: &Value) -> Option<TokenUsage> {
@@ -389,4 +446,12 @@ fn save_state(root: &Path, state: &OpenCodeState) -> Result<(), String> {
     let path = state_path(root)?;
     let data = serde_json::to_string_pretty(state).map_err(|err| err.to_string())?;
     fs::write(path, data).map_err(|err| err.to_string())
+}
+
+fn active_window_secs() -> i64 {
+    env::var("GG_ACTIVE_WINDOW_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(900)
 }

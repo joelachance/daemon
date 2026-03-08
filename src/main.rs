@@ -1,17 +1,19 @@
 use std::env;
 use std::process;
 
+mod api;
 mod claude;
-mod bedrock;
 mod cli;
 mod cursor;
 mod daemon;
+mod dashboard;
 mod git;
+mod grouping;
 mod opencode;
 mod session;
+mod session_row;
 mod status;
 mod store;
-mod dashboard;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -19,6 +21,9 @@ fn main() {
         Some(value) => value,
         None => {
             if env::var("GG_DAEMON").ok().as_deref() == Some("1") {
+                let _ = std::thread::spawn(|| {
+                    let _ = api::run_api_server();
+                });
                 if let Err(err) = daemon::run_daemon(false) {
                     eprintln!("gg daemon: {err}");
                     process::exit(1);
@@ -55,16 +60,5 @@ fn main() {
         return;
     }
 
-    let mut prompt_parts = Vec::new();
-    prompt_parts.push(first);
-    prompt_parts.extend(args);
-    let prompt = prompt_parts.join(" ");
-    if prompt.trim().is_empty() {
-        cli::print_help();
-        return;
-    }
-    if let Err(err) = cli::run_prompt(&prompt) {
-        eprintln!("error: {err}");
-        process::exit(1);
-    }
+    cli::print_help();
 }

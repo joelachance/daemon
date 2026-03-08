@@ -71,9 +71,9 @@ fn handle(method: &str, path: &str, body: &str) -> (u16, String) {
             }
         }
         if pieces.len() == 4 && pieces[2] == "changes" && pieces[3] == "unassigned" {
-            match store::list_unassigned_changes(pieces[1]).and_then(|changes| {
-                serde_json::to_string(&changes).map_err(|err| err.to_string())
-            }) {
+            match store::list_unassigned_changes(pieces[1])
+                .and_then(|changes| serde_json::to_string(&changes).map_err(|err| err.to_string()))
+            {
                 Ok(value) => return (200, value),
                 Err(err) => return error(err),
             }

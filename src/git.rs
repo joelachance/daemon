@@ -107,11 +107,7 @@ pub fn add_files_in_root(root: &str, files: &[String]) -> Result<(), String> {
 
 pub fn commit_message_in_root(root: &str, message: &str) -> Result<String, String> {
     let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(root)
-        .arg("commit")
-        .arg("-m")
-        .arg(message);
+    cmd.arg("-C").arg(root).arg("commit").arg("-m").arg(message);
     run_status(cmd)?;
     head_commit_in_root(root)
 }
@@ -138,7 +134,9 @@ pub fn write_ref_blob_in_root(root: &str, ref_name: &str, json: &str) -> Result<
     if !hash_output.status.success() {
         return Err("git hash-object failed".to_string());
     }
-    let blob_sha = String::from_utf8_lossy(&hash_output.stdout).trim().to_string();
+    let blob_sha = String::from_utf8_lossy(&hash_output.stdout)
+        .trim()
+        .to_string();
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(root)

@@ -16,13 +16,15 @@ fn infer_type(changes: &[Change]) -> &'static str {
     if changes.is_empty() {
         return "fix";
     }
-    if changes.iter().all(|change| change.file_path.ends_with(".md") || change.file_path.starts_with("docs/")) {
-        return "docs";
-    }
     if changes
         .iter()
-        .any(|change| change.file_path.contains("__tests__/") || change.file_path.contains(".test."))
+        .all(|change| change.file_path.ends_with(".md") || change.file_path.starts_with("docs/"))
     {
+        return "docs";
+    }
+    if changes.iter().any(|change| {
+        change.file_path.contains("__tests__/") || change.file_path.contains(".test.")
+    }) {
         return "test";
     }
     if changes.iter().all(|change| {
@@ -44,7 +46,10 @@ fn infer_type(changes: &[Change]) -> &'static str {
     if deleted > added {
         return "refactor";
     }
-    if changes.iter().all(|change| change.line_range.old_count == 0) {
+    if changes
+        .iter()
+        .all(|change| change.line_range.old_count == 0)
+    {
         return "feat";
     }
     "fix"

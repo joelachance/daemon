@@ -4,11 +4,14 @@ use std::path::Path;
 pub fn format_session_columns(session: &SessionInfo, width: usize, index: Option<usize>) -> String {
     let ide = normalize_ide(&session.ide);
     let repo = repo_display_name(&session.repo_path);
-    let branch = session
+    let mut branch = session
         .confirmed_branch
         .as_deref()
         .unwrap_or(&session.suggested_branch)
         .to_string();
+    if branch.trim().is_empty() {
+        branch = placeholder_branch_name(&session.id);
+    }
 
     // Keep IDE + branch stable, shrink repo first.
     let ide_w = 9usize;
@@ -27,6 +30,19 @@ pub fn format_session_columns(session: &SessionInfo, width: usize, index: Option
     match index {
         Some(idx) => format!("[{idx:<2}] {ide_col}  {repo_col}  {branch}"),
         None => format!("{ide_col}  {repo_col}  {branch}"),
+    }
+}
+
+fn placeholder_branch_name(session_id: &str) -> String {
+    let short = session_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>();
+    if short.is_empty() {
+        "feature/session".to_string()
+    } else {
+        format!("feature/session-{short}")
     }
 }
 

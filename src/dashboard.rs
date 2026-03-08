@@ -1,12 +1,11 @@
 use crate::daemon;
-use crate::git;
 use crate::session_row;
 use crate::store;
 use std::io::{self, Write};
+use time::OffsetDateTime;
 
 pub fn run_dashboard() -> Result<(), String> {
     daemon::ensure_daemon_running()?;
-    let root = git::repo_root()?;
 
     loop {
         print!("\x1B[2J\x1B[H");
@@ -18,7 +17,9 @@ pub fn run_dashboard() -> Result<(), String> {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(120);
 
-        let sessions = store::list_sessions_for_repo(&root)?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let window_secs = active_window_secs();
+        let sessions = store::list_active_cursor_sessions(now, window_secs)?;
         if sessions.is_empty() {
             println!("(no sessions)");
         } else {
@@ -31,8 +32,12 @@ pub fn run_dashboard() -> Result<(), String> {
                 let row = session_row::format_session_columns(session, width, Some(idx));
                 println!("{row}  {state}");
                 let drafts = store::list_drafts(&session.id)?;
-                for draft in drafts {
-                    println!("    - {}", draft.message);
+                if drafts.is_empty() {
+                    println!("    - (expected commits pending)");
+                } else {
+                    for draft in drafts {
+                        println!("    - {}", draft.message);
+                    }
                 }
                 println!();
             }
@@ -73,4 +78,12 @@ pub fn run_dashboard() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn active_window_secs() -> i64 {
+    std::env::var("GG_ACTIVE_WINDOW_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(900)
 }

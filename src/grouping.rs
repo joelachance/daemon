@@ -1,128 +1,62 @@
-use crate::session::Change;
-use std::collections::HashSet;
-use std::path::Path;
-
-pub fn infer_message(prompt: &str, changes: &[Change]) -> String {
-    let ty = infer_type(changes);
-    let scope = infer_scope(changes);
-    let subject = infer_subject(prompt);
-    match scope {
-        Some(scope) => format!("{ty}({scope}): {subject}"),
-        None => format!("{ty}: {subject}"),
-    }
-}
-
-fn infer_type(changes: &[Change]) -> &'static str {
-    if changes.is_empty() {
-        return "fix";
-    }
-    if changes
-        .iter()
-        .all(|change| change.file_path.ends_with(".md") || change.file_path.starts_with("docs/"))
-    {
-        return "docs";
-    }
-    if changes.iter().any(|change| {
-        change.file_path.contains("__tests__/") || change.file_path.contains(".test.")
-    }) {
-        return "test";
-    }
-    if changes.iter().all(|change| {
-        let path = change.file_path.as_str();
-        path.ends_with(".toml")
-            || path.ends_with(".yaml")
-            || path.ends_with(".yml")
-            || path.ends_with(".json")
-            || path.ends_with(".lock")
-    }) {
-        return "chore";
-    }
-    let mut deleted = 0i64;
-    let mut added = 0i64;
-    for change in changes {
-        deleted += change.line_range.old_count;
-        added += change.line_range.new_count;
-    }
-    if deleted > added {
-        return "refactor";
-    }
-    if changes
-        .iter()
-        .all(|change| change.line_range.old_count == 0)
-    {
-        return "feat";
-    }
-    "fix"
-}
-
-fn infer_scope(changes: &[Change]) -> Option<String> {
-    let mut dirs = HashSet::new();
-    for change in changes {
-        let parent = Path::new(&change.file_path).parent()?;
-        let name = parent.file_name()?.to_string_lossy().to_string();
-        if !name.is_empty() {
-            dirs.insert(name);
-        }
-    }
-    if dirs.len() == 1 {
-        dirs.into_iter().next()
+pub fn build_full_message(subject: &str, body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        subject.to_string()
     } else {
-        None
+        format!("{}\n\n{}", subject, body)
     }
 }
 
-fn infer_subject(prompt: &str) -> String {
-    let mut subject = prompt
-        .lines()
-        .next()
-        .unwrap_or("update session changes")
-        .trim()
-        .trim_end_matches('?')
-        .to_string();
-    if subject.is_empty() {
-        subject = "update session changes".to_string();
-    }
-    if subject.chars().count() > 72 {
-        subject = subject.chars().take(72).collect::<String>();
-    }
-    subject
+pub fn subject_line(full_message: &str) -> &str {
+    full_message.lines().next().unwrap_or("")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::session::{Change, ChangeLineRange};
+/// Returns the subject line truncated to max_chars for display.
+pub fn subject_line_truncated(full_message: &str, max_chars: usize) -> String {
+    let line = subject_line(full_message);
+    if line.chars().count() <= max_chars {
+        line.to_string()
+    } else if max_chars <= 3 {
+        line.chars().take(max_chars).collect()
+    } else {
+        let mut s: String = line.chars().take(max_chars - 3).collect();
+        s.push_str("...");
+        s
+    }
+}
 
-    fn change(path: &str, old_count: i64, new_count: i64) -> Change {
-        Change {
-            id: "id".to_string(),
-            session_id: "s".to_string(),
-            prompt_id: "t".to_string(),
-            file_path: path.to_string(),
-            base_commit_sha: "base".to_string(),
-            diff: String::new(),
-            line_range: ChangeLineRange {
-                old_start: 1,
-                old_count,
-                new_start: 1,
-                new_count,
-            },
-            captured_at: 0,
-            change_type: "edit".to_string(),
+const CONVERSATION_PHRASES: &[&str] = &[
+    "ok, here's",
+    "here's some",
+    "we need to follow",
+    "rules we need",
+    "let me ",
+    "i'll ",
+    "i will ",
+];
+
+/// Returns false if the subject looks like a conversation quote rather than a code-change description.
+pub fn is_valid_commit_subject(subject: &str) -> bool {
+    if subject.contains('\n') {
+        return false;
+    }
+    let lower = subject.to_lowercase();
+    for phrase in CONVERSATION_PHRASES {
+        if lower.contains(phrase) {
+            return false;
         }
     }
-
-    #[test]
-    fn infers_docs_type() {
-        let changes = vec![change("docs/README.md", 1, 2)];
-        let msg = infer_message("Update docs", &changes);
-        assert!(msg.starts_with("docs"));
+    let description = subject
+        .splitn(2, ':')
+        .nth(1)
+        .map(|s| s.trim())
+        .unwrap_or(subject);
+    if description.chars().count() < 10 {
+        return false;
     }
-
-    #[test]
-    fn infers_scope_when_common_dir() {
-        let changes = vec![change("src/api/a.ts", 1, 1), change("src/api/b.ts", 1, 1)];
-        let msg = infer_message("Fix handlers", &changes);
-        assert!(msg.contains("(api):"));
+    if description.ends_with(':') {
+        return false;
     }
+    true
 }
+

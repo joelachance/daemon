@@ -1,3 +1,4 @@
+use crate::session::Change;
 use aws_config;
 use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, Message, SystemContentBlock};
 use aws_sdk_bedrockruntime::Client;
@@ -5,19 +6,17 @@ use aws_types::region::Region;
 use serde::Deserialize;
 use std::env;
 
+const MAX_DIFF_BYTES: usize = 50 * 1024;
+
 const DEFAULT_MODEL_ID: &str = "amazon.nova-micro-v1:0";
 const DEFAULT_REGION: &str = "us-west-2";
 
 #[derive(Debug, Deserialize, Default)]
-pub struct BedrockPlan {
+pub struct CommitMessage {
     #[serde(default)]
-    pub summary: String,
+    pub subject: String,
     #[serde(default)]
-    pub commands: Vec<String>,
-    #[serde(default)]
-    pub assumptions: Vec<String>,
-    #[serde(default)]
-    pub risks: Vec<String>,
+    pub body: String,
 }
 
 pub struct BedrockClient {
@@ -36,13 +35,13 @@ impl BedrockClient {
         Ok(Self { client, model_id })
     }
 
-    pub async fn plan_git_commands(
+    pub async fn infer_commit_message(
         &self,
-        prompt: &str,
-        repo_root: Option<&str>,
-    ) -> Result<BedrockPlan, String> {
-        let system_prompt = build_system_prompt();
-        let user_prompt = build_user_prompt(prompt, repo_root);
+        turns: &[(String, String)],
+        changes: &[Change],
+    ) -> Result<CommitMessage, String> {
+        let system_prompt = "You are a git commit message assistant. Output only a JSON object with keys: subject, body. subject must be conventional commit format (type(scope): description), max 72 chars. Infer a summarization of the code changes based on the session conversation. The subject must describe the code changes. Never quote or paraphrase the conversation (e.g. no 'Ok, here's...', 'we need to follow', 'let me...'). The body must describe the intent and what changed in the code. Use the full conversation context, not just the first line. Wrap body lines at 72 chars. Do not include explanations outside JSON.";
+        let user_prompt = build_commit_prompt(turns, changes);
 
         let message = Message::builder()
             .role(ConversationRole::User)
@@ -50,15 +49,19 @@ impl BedrockClient {
             .build()
             .map_err(|err| err.to_string())?;
 
+        eprintln!("daemon: bedrock commit inference: model={}", self.model_id);
         let response = self
             .client
             .converse()
             .model_id(&self.model_id)
-            .system(SystemContentBlock::Text(system_prompt))
+            .system(SystemContentBlock::Text(system_prompt.to_string()))
             .messages(message)
             .send()
             .await
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| {
+                eprintln!("daemon: bedrock commit inference failed: {err}");
+                err.to_string()
+            })?;
 
         let output = response
             .output()
@@ -67,25 +70,89 @@ impl BedrockClient {
 
         let text = extract_text(output.content());
         if text.trim().is_empty() {
+            eprintln!("daemon: bedrock commit inference failed: empty response");
             return Err("bedrock: empty response".to_string());
         }
 
-        parse_plan(&text)
+        let msg = parse_commit_message(&text);
+        if msg.is_ok() {
+            eprintln!("daemon: bedrock commit inference: ok");
+        } else if let Err(ref e) = msg {
+            eprintln!("daemon: bedrock commit inference failed: {e}");
+        }
+        msg
     }
 }
 
-fn build_system_prompt() -> String {
-    "You are a git planning assistant. Output only a JSON object with keys: summary, commands, assumptions, risks. commands must be an array of git CLI commands only. Do not include shell operators, pipes, redirections, or quotes. Do not include explanations outside JSON."
-        .to_string()
+fn build_commit_prompt(turns: &[(String, String)], changes: &[Change]) -> String {
+    let mut out = String::from("Conversation:\n---\n");
+    for (prompt, response) in turns {
+        let p = prompt.trim();
+        let r = response.trim();
+        if !p.is_empty() {
+            out.push_str("User: ");
+            out.push_str(p);
+            out.push_str("\n---\n");
+        }
+        if !r.is_empty() {
+            out.push_str("Assistant: ");
+            out.push_str(r);
+            out.push_str("\n---\n");
+        }
+    }
+    out.push_str("\nCode changes (diffs):\n---\n");
+    let mut total_bytes = 0;
+    for change in changes {
+        if total_bytes >= MAX_DIFF_BYTES {
+            break;
+        }
+        out.push_str("File: ");
+        out.push_str(&change.file_path);
+        out.push_str("\n");
+        let remaining = MAX_DIFF_BYTES - total_bytes;
+        if change.diff.len() <= remaining {
+            out.push_str(&change.diff);
+            total_bytes += change.diff.len();
+        } else {
+            let end = remaining.min(change.diff.len());
+            out.push_str(&change.diff[..end]);
+            out.push_str("\n... (truncated)");
+            total_bytes = MAX_DIFF_BYTES;
+        }
+        out.push_str("\n---\n");
+    }
+    out.push_str("\nGenerate a git commit subject and body. Subject must be conventional commit format (type(scope): description). Body describes intent and changes.");
+    out
 }
 
-fn build_user_prompt(prompt: &str, repo_root: Option<&str>) -> String {
-    match repo_root {
-        Some(root) => format!(
-            "Prompt: {prompt}\nRepo root: {root}\nGenerate a git command plan.",
-        ),
-        None => format!("Prompt: {prompt}\nGenerate a git command plan."),
+fn parse_commit_message(text: &str) -> Result<CommitMessage, String> {
+    let trimmed = text.trim();
+    let cleaned = strip_code_fences(trimmed);
+    if let Ok(msg) = serde_json::from_str::<CommitMessage>(cleaned) {
+        return Ok(msg);
     }
+
+    let start = cleaned.find('{');
+    let end = cleaned.rfind('}');
+    match (start, end) {
+        (Some(start), Some(end)) if end > start => {
+            let slice = &cleaned[start..=end];
+            serde_json::from_str::<CommitMessage>(slice)
+                .map_err(|err| format!("bedrock: invalid json ({err})"))
+        }
+        _ => Err("bedrock: could not find json object".to_string()),
+    }
+}
+
+pub fn infer_commit_message_blocking(
+    turns: &[(String, String)],
+    changes: &[Change],
+) -> Result<CommitMessage, String> {
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        let client = BedrockClient::new().await?;
+        client.infer_commit_message(turns, changes).await
+    })
 }
 
 fn extract_text(blocks: &[ContentBlock]) -> String {
@@ -96,25 +163,6 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
         }
     }
     text
-}
-
-fn parse_plan(text: &str) -> Result<BedrockPlan, String> {
-    let trimmed = text.trim();
-    let cleaned = strip_code_fences(trimmed);
-    if let Ok(plan) = serde_json::from_str::<BedrockPlan>(cleaned) {
-        return Ok(plan);
-    }
-
-    let start = cleaned.find('{');
-    let end = cleaned.rfind('}');
-    match (start, end) {
-        (Some(start), Some(end)) if end > start => {
-            let slice = &cleaned[start..=end];
-            serde_json::from_str::<BedrockPlan>(slice)
-                .map_err(|err| format!("bedrock: invalid json ({err})"))
-        }
-        _ => Err("bedrock: could not find json object".to_string()),
-    }
 }
 
 fn strip_code_fences(text: &str) -> &str {

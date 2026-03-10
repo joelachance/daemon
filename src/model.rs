@@ -5,8 +5,8 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-pub const DEFAULT_REPO: &str = "bartowski/SmolLM2-1.7B-Instruct-GGUF";
-pub const DEFAULT_FILE: &str = "SmolLM2-1.7B-Instruct-Q4_K_M.gguf";
+pub const DEFAULT_REPO: &str = "bartowski/SmolLM2-360M-Instruct-GGUF";
+pub const DEFAULT_FILE: &str = "SmolLM2-360M-Instruct-Q4_K_M.gguf";
 
 static CACHED_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -26,14 +26,10 @@ pub fn default_model_path() -> Result<PathBuf, String> {
 
 #[cfg(feature = "llama-embedded")]
 fn default_model_path_impl() -> Result<PathBuf, String> {
-    if let Ok(mut guard) = CACHED_PATH.lock() {
+    if let Ok(guard) = CACHED_PATH.lock() {
         if let Some(ref p) = *guard {
-            if p.to_string_lossy().contains("SmolLM2-360M") {
-                *guard = None;
-            } else {
-                daemon_log::log(&format!("daemon: using cached model path: {}", p.display()));
-                return Ok(p.clone());
-            }
+            daemon_log::log(&format!("daemon: using cached model path: {}", p.display()));
+            return Ok(p.clone());
         }
     }
 
@@ -54,12 +50,6 @@ fn default_model_path_impl() -> Result<PathBuf, String> {
     }
     daemon_log::log(&format!("daemon: GG_LLAMA_MODEL not set, using default (may download)..."));
     let path = ensure_default_model()?;
-    if !path.to_string_lossy().contains("1.7B") {
-        return Err(format!(
-            "default model must be 1.7B, got {:?} (rebuild may be stale)",
-            path.display()
-        ));
-    }
     if let Ok(mut g) = CACHED_PATH.lock() {
         *g = Some(path.clone());
     }
@@ -106,12 +96,12 @@ fn find_cached_default_model() -> Option<PathBuf> {
         .ok()
         .map(PathBuf::from)
         .or_else(|| env::var("HOME").ok().map(|h| PathBuf::from(h).join(".cache").join("huggingface")))?;
-    let refs_path = hub.join("hub").join("models--bartowski--SmolLM2-1.7B-Instruct-GGUF").join("refs").join("main");
+    let refs_path = hub.join("hub").join("models--bartowski--SmolLM2-360M-Instruct-GGUF").join("refs").join("main");
     let commit = std::fs::read_to_string(&refs_path).ok()?;
     let commit = commit.trim();
     let path = hub
         .join("hub")
-        .join("models--bartowski--SmolLM2-1.7B-Instruct-GGUF")
+        .join("models--bartowski--SmolLM2-360M-Instruct-GGUF")
         .join("snapshots")
         .join(commit)
         .join(DEFAULT_FILE);

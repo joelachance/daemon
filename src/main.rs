@@ -2,13 +2,19 @@ use std::env;
 use std::process;
 
 mod api;
+mod bedrock;
 mod claude;
-mod cli;
-mod cursor;
 mod daemon;
+#[macro_use]
+mod daemon_log;
 mod dashboard;
 mod git;
 mod grouping;
+mod llama;
+mod llm;
+mod model;
+mod cli;
+mod cursor;
 mod opencode;
 mod session;
 mod session_row;
@@ -21,6 +27,11 @@ fn main() {
         Some(value) => value,
         None => {
             if env::var("GG_DAEMON").ok().as_deref() == Some("1") {
+                daemon_log::init();
+                #[cfg(feature = "llama-embedded")]
+                daemon_log::log(&format!("daemon: embedded model when unset: {}", model::DEFAULT_FILE));
+                #[cfg(not(feature = "llama-embedded"))]
+                daemon_log::log("daemon: llm provider order: OpenAI > Anthropic > Ollama (default)");
                 let _ = std::thread::spawn(|| {
                     let _ = api::run_api_server();
                 });

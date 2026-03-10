@@ -3,6 +3,7 @@ use crate::daemon_log;
 use crate::git;
 use crate::grouping;
 use crate::llm;
+use crate::path;
 use crate::session_row;
 use crate::store;
 use crossterm::event::{poll, read, Event, KeyCode, KeyEventKind};
@@ -101,6 +102,13 @@ fn read_daemon_log_lines() -> Vec<String> {
     lines
 }
 
+fn dashboard_poll_ms() -> u64 {
+    std::env::var("GG_DASHBOARD_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2000)
+}
+
 fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
     store::init()?;
     let mut view = View::Sessions { selected: 0 };
@@ -110,18 +118,29 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
     let mut spinner_frame: usize = 0;
     let mut log_scroll: u16 = 0;
     let mut slash_menu: Option<SlashMenuState> = None;
+    let mut sessions: Vec<store::SessionInfo> = Vec::new();
+    let mut last_refresh_mtime: Option<std::time::SystemTime> = None;
 
     loop {
-        let now = OffsetDateTime::now_utc().unix_timestamp();
-        let window_secs = active_window_secs();
-        let sessions = match git::repo_root() {
-            Ok(root) => {
-                let path = std::path::Path::new(&root);
-                let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-                store::list_open_sessions_for_repo(canonical.to_string_lossy().as_ref())?
-            }
-            Err(_) => store::list_active_sessions(now, window_secs)?,
-        };
+        let should_refetch = last_refresh_mtime.is_none()
+            || match (store::refresh_signal_mtime(), last_refresh_mtime) {
+                (Some(mtime), Some(last)) if mtime > last => true,
+                _ => false,
+            };
+        if should_refetch {
+            let now = OffsetDateTime::now_utc().unix_timestamp();
+            let window_secs = active_window_secs();
+            sessions = match git::repo_root() {
+                Ok(root) => {
+                    let p = std::path::Path::new(&root);
+                    let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+                    let repo = path::normalize_repo_path(&canonical.to_string_lossy());
+                    store::list_open_sessions_for_repo(&repo)?
+                }
+                Err(_) => store::list_active_sessions(now, window_secs)?,
+            };
+            last_refresh_mtime = store::refresh_signal_mtime();
+        }
 
         if let Some(ref rx) = refresh_rx {
             if rx.try_recv().is_ok() {
@@ -146,15 +165,18 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
             })
             .map_err(|e| e.to_string())?;
 
-        let event = if refreshing {
-            if poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
-                Some(read().map_err(|e| e.to_string())?)
-            } else {
-                spinner_frame = (spinner_frame + 1) % SPINNER.len();
-                None
-            }
+        let poll_duration = if refreshing {
+            Duration::from_millis(100)
         } else {
+            Duration::from_millis(dashboard_poll_ms())
+        };
+        let event = if poll(poll_duration).map_err(|e| e.to_string())? {
             Some(read().map_err(|e| e.to_string())?)
+        } else {
+            if refreshing {
+                spinner_frame = (spinner_frame + 1) % SPINNER.len();
+            }
+            None
         };
 
         let key = match event {
@@ -334,7 +356,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                         if item == "Models" {
                             menu.level = 1;
                             #[cfg(feature = "llama-embedded")]
-                            let mut items = vec![
+                            let items = vec![
                                 "OpenAI".to_string(),
                                 "Anthropic".to_string(),
                                 "Llama".to_string(),

@@ -1,0 +1,18 @@
+[tasks.buildd]
+description = "Build debug and link to ./ggd"
+dependencies = ["build"]
+script = '''
+ln -sf "${CARGO_MAKE_CRATE_TARGET_DIRECTORY}/debug/gg" ggd
+echo "Linked: ggd -> target/debug/gg"
+'''
+[tasks.buildr]
+description = "Build release and link to ./ggr"
+dependencies = ["buildr-only"]
+script = '''
+ln -sf "${CARGO_MAKE_CRATE_TARGET_DIRECTORY}/release/gg" ggr
+echo "Linked: ggr -> target/release/gg"
+'''
+
+[tasks.build-release-only]
+command = "cargo"
+args = ["build", "--release"]

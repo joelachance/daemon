@@ -5,6 +5,7 @@ mod api;
 mod bedrock;
 mod claude;
 mod daemon;
+mod path;
 #[macro_use]
 mod daemon_log;
 mod dashboard;

@@ -1,5 +1,6 @@
 use crate::daemon;
 use crate::git;
+use crate::path;
 use crate::session::TokenUsage;
 use crate::store;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -70,13 +71,15 @@ pub fn poll_assistant_messages(
         Some(conn) => conn,
         None => return Ok(0),
     };
+    let root_norm = path::normalize_repo_path(&root_str);
+    let matching_session_ids = fetch_sessions_matching_root(&conn, &root_norm)?;
     let active_sessions =
-        fetch_recent_active_session_ids_for_repo(&conn, &root_str, now, active_window_secs)?;
+        fetch_recent_active_session_ids(&conn, &matching_session_ids, now, active_window_secs)?;
     for session_id in &active_sessions {
         daemon::upsert_session_presence(session_id, "opencode", &root, None)?;
     }
     let cutoff = now.saturating_sub(active_window_secs);
-    let mut parts = fetch_assistant_parts_for_repo(&conn, &root_str, Some(cutoff))?;
+    let mut parts = fetch_assistant_parts_for_sessions(&conn, &matching_session_ids, Some(cutoff))?;
     parts.sort_by_key(|part| part.part_time_created);
 
     let mut emitted = 0usize;
@@ -207,7 +210,7 @@ pub fn poll_assistant_messages(
     }
 
     let active_ids: HashSet<_> = active_sessions.into_iter().collect();
-    for item in store::list_sessions_for_repo(&root_str)? {
+    for item in store::list_sessions_for_repo(&root_norm)? {
         if item.ide.eq_ignore_ascii_case("opencode")
             && item.ended_at.is_none()
             && !active_ids.contains(&item.id)
@@ -261,11 +264,88 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn fetch_assistant_parts_for_repo(
+fn fetch_sessions_matching_root(
     conn: &Connection,
-    root: &str,
+    root_norm: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "select s.id, s.directory, pr.worktree
+             from session s
+             join project pr on pr.id = s.project_id",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<usize, String>(0)?,
+                row.get::<usize, Option<String>>(1)?,
+                row.get::<usize, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|err| err.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (session_id, dir, worktree) = row.map_err(|err| err.to_string())?;
+        let dir_norm = dir.as_ref().map(|d| path::normalize_repo_path(d));
+        let worktree_norm = worktree.as_ref().map(|w| path::normalize_repo_path(w));
+        if dir_norm.as_ref().map(|d| d == root_norm).unwrap_or(false)
+            || worktree_norm.as_ref().map(|w| w == root_norm).unwrap_or(false)
+        {
+            out.push(session_id);
+        }
+    }
+    Ok(out)
+}
+
+fn fetch_recent_active_session_ids(
+    conn: &Connection,
+    session_ids: &[String],
+    now: i64,
+    active_window_secs: i64,
+) -> Result<Vec<String>, String> {
+    if session_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cutoff = now - active_window_secs;
+    let placeholders = session_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "select s.id, max(p.time_created) \
+         from session s \
+         join message m on m.session_id = s.id \
+         join part p on p.message_id = m.id \
+         where s.id in ({}) \
+           and json_extract(m.data, '$.role') = 'assistant' \
+           and json_extract(p.data, '$.type') = 'text' \
+         group by s.id",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|err| err.to_string())?;
+    let params: Vec<&str> = session_ids.iter().map(|s| s.as_str()).collect();
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((row.get::<usize, String>(0)?, row.get::<usize, Option<i64>>(1)?))
+        })
+        .map_err(|err| err.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (session_id, last_part) = row.map_err(|err| err.to_string())?;
+        let seen_at = last_part.map(to_seconds).unwrap_or(0);
+        if seen_at >= cutoff {
+            out.push(session_id);
+        }
+    }
+    Ok(out)
+}
+
+fn fetch_assistant_parts_for_sessions(
+    conn: &Connection,
+    session_ids: &[String],
     cutoff_secs: Option<i64>,
 ) -> Result<Vec<OpenCodeAssistantPart>, String> {
+    if session_ids.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut prompt_stmt = conn
         .prepare_cached(
             "select json_extract(p.data, '$.text') \
@@ -279,19 +359,20 @@ fn fetch_assistant_parts_for_repo(
              limit 1",
         )
         .map_err(|err| err.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "select s.id, s.title, s.directory, s.project_id, m.id, m.data, p.id, p.time_created, p.data \
-             from session s \
-             join project pr on pr.id = s.project_id \
-             join message m on m.session_id = s.id \
-             join part p on p.message_id = m.id \
-             where s.directory = ?1 or pr.worktree = ?1",
-        )
-        .map_err(|err| err.to_string())?;
-
+    let placeholders = session_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "select s.id, s.title, s.directory, s.project_id, m.id, m.data, p.id, p.time_created, p.data \
+         from session s \
+         join project pr on pr.id = s.project_id \
+         join message m on m.session_id = s.id \
+         join part p on p.message_id = m.id \
+         where s.id in ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|err| err.to_string())?;
+    let params: Vec<&str> = session_ids.iter().map(|s| s.as_str()).collect();
     let rows = stmt
-        .query_map([root], |row| {
+        .query_map(rusqlite::params_from_iter(params), |row| {
             Ok(OpenCodeRow {
                 session_id: row.get(0)?,
                 session_title: row.get(1)?,
@@ -357,44 +438,6 @@ fn fetch_assistant_parts_for_repo(
     }
 
     Ok(parts)
-}
-
-fn fetch_recent_active_session_ids_for_repo(
-    conn: &Connection,
-    root: &str,
-    now: i64,
-    active_window_secs: i64,
-) -> Result<Vec<String>, String> {
-    let cutoff = now - active_window_secs;
-    let mut stmt = conn
-        .prepare(
-            "select s.id, max(p.time_created) \
-             from session s \
-             join project pr on pr.id = s.project_id \
-             join message m on m.session_id = s.id \
-             join part p on p.message_id = m.id \
-             where s.directory = ?1 or pr.worktree = ?1 \
-               and json_extract(m.data, '$.role') = 'assistant' \
-               and json_extract(p.data, '$.type') = 'text' \
-             group by s.id",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map([root], |row| {
-            let session_id: String = row.get(0)?;
-            let last_part: Option<i64> = row.get(1)?;
-            Ok((session_id, last_part))
-        })
-        .map_err(|err| err.to_string())?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (session_id, last_part) = row.map_err(|err| err.to_string())?;
-        let seen_at = last_part.map(to_seconds).unwrap_or(0);
-        if seen_at >= cutoff {
-            out.push(session_id);
-        }
-    }
-    Ok(out)
 }
 
 fn discover_opencode_repo_roots() -> Result<Vec<PathBuf>, String> {

@@ -60,6 +60,9 @@ fn handle(method: &str, path: &str, body: &str) -> (u16, String) {
         if provider.is_empty() {
             return error("provider is required".to_string());
         }
+        #[cfg(feature = "llama-embedded")]
+        let valid = ["openai", "anthropic", "ollama", "llama"];
+        #[cfg(not(feature = "llama-embedded"))]
         let valid = ["openai", "anthropic", "ollama"];
         if !valid.contains(&provider.to_lowercase().as_str()) {
             return error(format!("provider must be one of: {}", valid.join(", ")));

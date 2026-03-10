@@ -330,7 +330,10 @@ fn select_provider() -> Option<Provider> {
     if env::var("ANTHROPIC_API_KEY").is_ok() {
         return Some(Provider::Anthropic);
     }
-    Some(Provider::Ollama)
+    #[cfg(feature = "llama-embedded")]
+    return Some(Provider::Llama);
+    #[cfg(not(feature = "llama-embedded"))]
+    return Some(Provider::Ollama);
 }
 
 async fn infer_openai(turns: &[(String, String)], changes: &[Change]) -> Result<CommitMessage, String> {

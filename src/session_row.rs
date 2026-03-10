@@ -1,7 +1,13 @@
 use crate::store::SessionInfo;
 use std::path::Path;
 
-pub fn format_session_columns(session: &SessionInfo, width: usize, index: Option<usize>) -> String {
+/// Returns (ide_col, repo_col, branch, index_prefix) for styled rendering.
+/// index_prefix is e.g. "[ 0]" or None if no index.
+pub fn format_session_parts(
+    session: &SessionInfo,
+    width: usize,
+    index: Option<usize>,
+) -> (String, String, String, Option<String>) {
     let ide = normalize_ide(&session.ide);
     let repo = repo_display_name(&session.repo_path);
     let mut branch = session
@@ -13,24 +19,30 @@ pub fn format_session_columns(session: &SessionInfo, width: usize, index: Option
         branch = placeholder_branch_name(&session.id);
     }
 
-    // Keep IDE + branch stable, shrink repo first.
+    // Keep IDE + branch stable, shrink repo first. Cap repo width so branch
+    // doesn't get pushed to the far right on wide terminals.
     let ide_w = 9usize;
     let min_repo_w = 10usize;
+    let max_repo_w = 40usize;
     let separators = if index.is_some() { 8usize } else { 4usize };
     let reserved = ide_w + separators + branch.chars().count();
     let repo_w = if width > reserved + min_repo_w {
-        width - reserved
+        (width - reserved).min(max_repo_w)
     } else {
         min_repo_w
     };
 
     let ide_col = pad_right(&truncate(&ide, ide_w), ide_w);
     let repo_col = pad_right(&truncate(&repo, repo_w), repo_w);
+    let idx_prefix = index.map(|idx| format!("[{idx:<2}] "));
 
-    match index {
-        Some(idx) => format!("[{idx:<2}] {ide_col}  {repo_col}  {branch}"),
-        None => format!("{ide_col}  {repo_col}  {branch}"),
-    }
+    (ide_col, repo_col, branch, idx_prefix)
+}
+
+pub fn format_session_columns(session: &SessionInfo, width: usize, index: Option<usize>) -> String {
+    let (ide_col, repo_col, branch, idx_prefix) = format_session_parts(session, width, index);
+    let prefix = idx_prefix.unwrap_or_default();
+    format!("{prefix}{ide_col}  {repo_col}  {branch}")
 }
 
 fn placeholder_branch_name(session_id: &str) -> String {

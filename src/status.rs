@@ -7,7 +7,7 @@ pub fn run_status_ui() -> Result<(), String> {
     daemon::ensure_daemon_running()?;
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let window_secs = active_window_secs();
-    let sessions = store::list_active_cursor_sessions(now, window_secs)?;
+    let sessions = store::list_active_sessions(now, window_secs)?;
     if sessions.is_empty() {
         println!("no sessions");
         return Ok(());
@@ -22,12 +22,8 @@ pub fn run_status_ui() -> Result<(), String> {
             session_row::format_session_columns(&session, width, None)
         );
         let drafts = store::list_drafts(&session.id)?;
-        if drafts.is_empty() {
-            println!("  - (expected commits pending)");
-        } else {
-            for draft in drafts {
-                println!("  - {}", draft.message);
-            }
+        for draft in drafts {
+            println!("  - {}", draft.message);
         }
     }
     Ok(())

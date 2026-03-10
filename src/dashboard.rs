@@ -1,12 +1,17 @@
 use crate::daemon;
+use crate::daemon_log;
+use crate::git;
 use crate::grouping;
+use crate::llm;
 use crate::session_row;
 use crate::store;
-use crossterm::event::{read, Event, KeyCode, KeyEventKind};
+use crossterm::event::{poll, read, Event, KeyCode, KeyEventKind};
+use std::sync::mpsc;
+use std::time::Duration;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{ListItem, List, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, ListItem, List, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use time::OffsetDateTime;
 
@@ -52,10 +57,17 @@ enum View {
     Diff {
         session_idx: usize,
         draft_idx: usize,
+        file_idx: usize,
         scroll_offset: u16,
     },
     EditBranch { session_idx: usize, buffer: String },
     EditCommit { session_idx: usize, draft_idx: usize, buffer: String },
+}
+
+struct SlashMenuState {
+    level: usize,
+    items: Vec<String>,
+    selected: usize,
 }
 
 pub fn run_dashboard() -> Result<(), String> {
@@ -67,24 +79,88 @@ pub fn run_dashboard() -> Result<(), String> {
     result
 }
 
+const SPINNER: &[&str] = &["|", "/", "-", "\\"];
+
+fn show_daemon_log() -> bool {
+    match std::env::var("GG_DAEMON_LOG") {
+        Ok(v) => !matches!(v.to_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Err(_) => true,
+    }
+}
+
+fn read_daemon_log_lines() -> Vec<String> {
+    let path = daemon_log::log_path_for_reader();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return vec!["(no log file)".to_string()],
+    };
+    let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    if lines.is_empty() {
+        return vec!["(empty)".to_string()];
+    }
+    lines
+}
+
 fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
+    store::init()?;
     let mut view = View::Sessions { selected: 0 };
     let mut accept_pending = false;
     let mut status: Option<(bool, String)> = None;
+    let mut refresh_rx: Option<mpsc::Receiver<()>> = None;
+    let mut spinner_frame: usize = 0;
+    let mut log_scroll: u16 = 0;
+    let mut slash_menu: Option<SlashMenuState> = None;
 
     loop {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let window_secs = active_window_secs();
-        let sessions = store::list_active_sessions(now, window_secs)?;
+        let sessions = match git::repo_root() {
+            Ok(root) => {
+                let path = std::path::Path::new(&root);
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+                store::list_open_sessions_for_repo(canonical.to_string_lossy().as_ref())?
+            }
+            Err(_) => store::list_active_sessions(now, window_secs)?,
+        };
+
+        if let Some(ref rx) = refresh_rx {
+            if rx.try_recv().is_ok() {
+                refresh_rx = None;
+            }
+        }
+        let refreshing = refresh_rx.is_some();
 
         terminal
-            .draw(|frame| render(frame, &view, &sessions, &accept_pending, &status))
+            .draw(|frame| {
+                render(
+                    frame,
+                    &view,
+                    &sessions,
+                    &accept_pending,
+                    &status,
+                    refreshing,
+                    spinner_frame,
+                    log_scroll,
+                    &slash_menu,
+                )
+            })
             .map_err(|e| e.to_string())?;
 
-        let event = read().map_err(|e| e.to_string())?;
+        let event = if refreshing {
+            if poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
+                Some(read().map_err(|e| e.to_string())?)
+            } else {
+                spinner_frame = (spinner_frame + 1) % SPINNER.len();
+                None
+            }
+        } else {
+            Some(read().map_err(|e| e.to_string())?)
+        };
+
         let key = match event {
-            Event::Key(ke) if ke.kind == KeyEventKind::Press => ke.code,
-            _ => continue,
+            Some(Event::Key(ke)) if ke.kind == KeyEventKind::Press => ke.code,
+            Some(_) => continue,
+            None => continue,
         };
 
         let edit_done = match &mut view {
@@ -198,8 +274,138 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
             status = None;
         }
 
+        if show_daemon_log() {
+            if key == KeyCode::Char('J') {
+                log_scroll = log_scroll.saturating_sub(1);
+                continue;
+            }
+            if key == KeyCode::Char('K') {
+                log_scroll = log_scroll.saturating_add(1);
+                continue;
+            }
+        }
+
+        if key == KeyCode::Char('/') && slash_menu.is_none() {
+            slash_menu = Some(SlashMenuState {
+                level: 0,
+                items: vec!["Models".to_string()],
+                selected: 0,
+            });
+            continue;
+        }
+
+        if let Some(mut menu) = slash_menu.take() {
+            let mut close_with_status: Option<(bool, String)> = None;
+            match key {
+                KeyCode::Esc => {
+                    if menu.level == 0 {
+                        // close menu
+                    } else if menu.level == 1 {
+                        menu = SlashMenuState {
+                            level: 0,
+                            items: vec!["Models".to_string()],
+                            selected: 0,
+                        };
+                        slash_menu = Some(menu);
+                    } else {
+                        menu = SlashMenuState {
+                            level: 1,
+                            items: vec![
+                                "OpenAI".to_string(),
+                                "Anthropic".to_string(),
+                                "Ollama".to_string(),
+                            ],
+                            selected: 0,
+                        };
+                        slash_menu = Some(menu);
+                    }
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    menu.selected = (menu.selected + 1).min(menu.items.len().saturating_sub(1));
+                    slash_menu = Some(menu);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    menu.selected = menu.selected.saturating_sub(1);
+                    slash_menu = Some(menu);
+                }
+                KeyCode::Enter => {
+                    let item = menu.items.get(menu.selected).cloned().unwrap_or_default();
+                    if menu.level == 0 {
+                        if item == "Models" {
+                            menu.level = 1;
+                            #[cfg(feature = "llama-embedded")]
+                            let mut items = vec![
+                                "OpenAI".to_string(),
+                                "Anthropic".to_string(),
+                                "Llama".to_string(),
+                                "Ollama".to_string(),
+                            ];
+                            #[cfg(not(feature = "llama-embedded"))]
+                            let items = vec![
+                                "OpenAI".to_string(),
+                                "Anthropic".to_string(),
+                                "Ollama".to_string(),
+                            ];
+                            menu.items = items;
+                            menu.selected = 0;
+                            slash_menu = Some(menu);
+                        } else {
+                            slash_menu = Some(menu);
+                        }
+                    } else if menu.level == 1 {
+                        match item.as_str() {
+                            "OpenAI" => {
+                                let _ = store::set_llm_provider("openai");
+                                close_with_status = Some((true, "Switched to OpenAI".to_string()));
+                            }
+                            "Anthropic" => {
+                                let _ = store::set_llm_provider("anthropic");
+                                close_with_status = Some((true, "Switched to Anthropic".to_string()));
+                            }
+                            #[cfg(feature = "llama-embedded")]
+                            "Llama" => {
+                                let _ = store::set_llm_provider("llama");
+                                close_with_status = Some((true, "Switched to Llama (embedded)".to_string()));
+                            }
+                            "Ollama" => {
+                                match llm::list_ollama_models_blocking() {
+                                    Ok(models) if !models.is_empty() => {
+                                        menu.level = 2;
+                                        menu.items = models;
+                                        menu.selected = 0;
+                                        slash_menu = Some(menu);
+                                    }
+                                    Ok(_) | Err(_) => {
+                                        let _ = store::set_llm_provider("ollama");
+                                        close_with_status = Some((
+                                            true,
+                                            "Switched to Ollama (default model)".to_string(),
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {
+                                slash_menu = Some(menu);
+                            }
+                        }
+                    } else {
+                        let _ = store::set_ollama_model(&item);
+                        let _ = store::set_llm_provider("ollama");
+                        close_with_status = Some((true, format!("Switched to Ollama ({})", item)));
+                    }
+                    if let Some(s) = close_with_status {
+                        status = Some(s);
+                    }
+                }
+                _ => {
+                    slash_menu = Some(menu);
+                }
+            }
+            continue;
+        }
+
         let (down, up, back, enter, quit) = match key {
-            KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Down => {
+            KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Char(' ') | KeyCode::Down => {
                 (true, false, false, false, false)
             }
             KeyCode::Char('k') | KeyCode::Up => (false, true, false, false, false),
@@ -219,6 +425,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                 }
                 continue;
             }
+            KeyCode::Char('p') => (false, false, false, false, false),
             KeyCode::Char('e') => {
                 if let View::Sessions { selected } = &view {
                     if *selected < sessions.len() {
@@ -255,6 +462,11 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                 }
                 continue;
             }
+            KeyCode::Char('r') => {
+                // Manual refresh: clear pending refresh so we show current store state
+                refresh_rx = None;
+                continue;
+            }
             _ => continue,
         };
 
@@ -265,6 +477,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
         if let View::Diff {
             session_idx,
             draft_idx,
+            file_idx,
             scroll_offset,
         } = &mut view
         {
@@ -275,39 +488,70 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                 };
                 continue;
             }
-            if down || up {
-                let total_lines = if let Some(session) = sessions.get(*session_idx) {
-                    if let Ok(drafts) = store::list_drafts(&session.id) {
-                        if let Some(draft) = drafts.get(*draft_idx) {
-                            store::draft_change_ids(&draft.id)
-                                .unwrap_or_default()
-                                .iter()
-                                .filter_map(|id| store::get_change(id).ok().flatten())
-                                .map(|c| c.diff.lines().count())
-                                .sum::<usize>()
-                        } else {
-                            0
-                        }
+            let num_files = if let Some(session) = sessions.get(*session_idx) {
+                if let Ok(drafts) = store::list_drafts(&session.id) {
+                    if let Some(draft) = drafts.get(*draft_idx) {
+                        store::draft_change_ids(&draft.id).unwrap_or_default().len()
                     } else {
                         0
                     }
                 } else {
                     0
-                };
-                let header_len = if accept_pending { 3 } else { 2 };
-                let viewport_height = terminal
-                    .size()
-                    .map(|s| s.height.saturating_sub(header_len).saturating_sub(1))
-                    .unwrap_or(20);
-                let max_scroll = total_lines
-                    .saturating_sub(viewport_height as usize)
-                    .min(u16::MAX as usize) as u16;
-                if down {
-                    *scroll_offset = (*scroll_offset + 1).min(max_scroll);
-                } else {
-                    *scroll_offset = scroll_offset.saturating_sub(1);
                 }
-                continue;
+            } else {
+                0
+            };
+            match key {
+                KeyCode::Char('j') | KeyCode::Down if num_files > 0 => {
+                    *file_idx = (*file_idx + 1).min(num_files.saturating_sub(1));
+                    *scroll_offset = 0;
+                    continue;
+                }
+                KeyCode::Char('k') | KeyCode::Up if num_files > 0 => {
+                    *file_idx = file_idx.saturating_sub(1);
+                    *scroll_offset = 0;
+                    continue;
+                }
+                KeyCode::Char('n') | KeyCode::Char(' ') => {
+                    let total_lines = if let Some(session) = sessions.get(*session_idx) {
+                        if let Ok(drafts) = store::list_drafts(&session.id) {
+                            if let Some(draft) = drafts.get(*draft_idx) {
+                                let change_ids =
+                                    store::draft_change_ids(&draft.id).unwrap_or_default();
+                                if let Some(change_id) = change_ids.get(*file_idx) {
+                                    store::get_change(change_id)
+                                        .ok()
+                                        .flatten()
+                                        .map(|c| c.diff.lines().count())
+                                        .unwrap_or(0)
+                                } else {
+                                    0
+                                }
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    let header_len = if accept_pending { 3 } else { 2 };
+                    let viewport_height = terminal
+                        .size()
+                        .map(|s| s.height.saturating_sub(header_len).saturating_sub(1))
+                        .unwrap_or(20);
+                    let max_scroll = total_lines
+                        .saturating_sub(viewport_height as usize)
+                        .min(u16::MAX as usize) as u16;
+                    *scroll_offset = (*scroll_offset + 1).min(max_scroll);
+                    continue;
+                }
+                KeyCode::Char('p') => {
+                    *scroll_offset = scroll_offset.saturating_sub(1);
+                    continue;
+                }
+                _ => {}
             }
             continue;
         }
@@ -321,6 +565,13 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                 } else if up && len > 0 {
                     *selected = selected.saturating_sub(1);
                 } else if enter && len > 0 {
+                    let session_id = sessions[*selected].id.clone();
+                    let (tx, rx) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = daemon::send_refresh_drafts(&session_id);
+                        let _ = tx.send(());
+                    });
+                    refresh_rx = Some(rx);
                     let drafts = store::list_drafts(&sessions[*selected].id)?;
                     let commit_selected = if drafts.is_empty() { 0 } else { 0 };
                     view = View::Commits {
@@ -348,6 +599,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                         view = View::Diff {
                             session_idx: *session_idx,
                             draft_idx: *selected,
+                            file_idx: 0,
                             scroll_offset: 0,
                         };
                     }
@@ -365,6 +617,10 @@ fn render(
     sessions: &[store::SessionInfo],
     accept_pending: &bool,
     status: &Option<(bool, String)>,
+    refreshing: bool,
+    spinner_frame: usize,
+    log_scroll: u16,
+    slash_menu: &Option<SlashMenuState>,
 ) {
     let width = frame.area().width as usize;
 
@@ -390,37 +646,92 @@ fn render(
             )),
             Line::from(Span::styled(msg.clone(), style)),
         ]
+    } else if refreshing {
+        let spin = SPINNER[spinner_frame];
+        vec![
+            Line::from(Span::styled("vibe dashboard", theme::header_title())),
+            Line::from(vec![
+                Span::styled(
+                    format!(" {} Refreshing commit messages... (r=show store)", spin),
+                    theme::header_hint(),
+                ),
+            ]),
+        ]
     } else {
         vec![
             Line::from(Span::styled("vibe dashboard", theme::header_title())),
             Line::from(Span::styled(
-                "j/k/n=move  l/enter=select  h/esc=back  a+Enter=accept  q=quit",
+                "j/k/n=move  l/enter=select  h/esc=back  a+Enter=accept  r=refresh  /=menu  q=quit",
                 theme::header_hint(),
             )),
         ]
     };
 
-    let chunks = Layout::vertical([
-        Constraint::Length(header_lines.len() as u16),
-        Constraint::Min(0),
-    ])
-    .split(frame.area());
+    let chunks = if show_daemon_log() {
+        Layout::vertical([
+            Constraint::Length(header_lines.len() as u16),
+            Constraint::Min(0),
+            Constraint::Length(9),
+        ])
+        .split(frame.area())
+    } else {
+        Layout::vertical([
+            Constraint::Length(header_lines.len() as u16),
+            Constraint::Min(0),
+        ])
+        .split(frame.area())
+    };
 
     let header = Paragraph::new(Text::from(header_lines));
     frame.render_widget(header, chunks[0]);
+
+    if show_daemon_log() {
+        let log_chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(chunks[2]);
+
+        let log_lines = read_daemon_log_lines();
+        let total_log_lines = log_lines.len() as u16;
+        let viewport = log_chunks[1].height;
+        let max_scroll = total_log_lines.saturating_sub(viewport).min(u16::MAX);
+        let clamped_scroll = log_scroll.min(max_scroll);
+        let scroll_y = max_scroll.saturating_sub(clamped_scroll);
+        let log_text: Text = log_lines
+            .iter()
+            .map(|s| Line::from(Span::raw(s.as_str())))
+            .collect::<Vec<_>>()
+            .into();
+        let log_para = Paragraph::new(log_text)
+            .wrap(Wrap { trim: false })
+            .style(theme::header_hint())
+            .scroll((scroll_y, 0));
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "daemon log (J/K=scroll, GG_DAEMON_LOG=0 to hide):",
+                theme::header_title(),
+            )),
+            log_chunks[0],
+        );
+        frame.render_widget(log_para, log_chunks[1]);
+    }
+
+    let main_chunk = chunks[1];
 
     match view {
         View::Diff {
             session_idx,
             draft_idx,
+            file_idx,
             scroll_offset,
         } => {
             let diff_chunks = Layout::vertical([
-                Constraint::Min(3),
+                Constraint::Length(2),
                 Constraint::Min(0),
                 Constraint::Length(1),
             ])
-            .split(chunks[1]);
+            .split(main_chunk);
             let viewport_height = diff_chunks[1].height as usize;
             if let Some(session) = sessions.get(*session_idx) {
                 let drafts = store::list_drafts(&session.id).unwrap_or_default();
@@ -429,20 +740,58 @@ fn render(
                         Paragraph::new(draft.message.as_str()).wrap(Wrap { trim: false });
                     frame.render_widget(msg_para, diff_chunks[0]);
                     let change_ids = store::draft_change_ids(&draft.id).unwrap_or_default();
+                    let changes: Vec<_> = change_ids
+                        .iter()
+                        .filter_map(|id| store::get_change(id).ok().flatten())
+                        .collect();
+                    let file_count = changes.len();
+                    let clamped_file_idx = (*file_idx).min(file_count.saturating_sub(1));
+
+                    let main_split = Layout::horizontal([
+                        Constraint::Length(30),
+                        Constraint::Min(0),
+                    ])
+                    .split(diff_chunks[1]);
+
+                    let file_items: Vec<ListItem> = changes
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, change)| {
+                            let marker = if idx == clamped_file_idx { "> " } else { "  " };
+                            let style = if idx == clamped_file_idx {
+                                theme::selected()
+                            } else {
+                                Style::default()
+                            };
+                            let path = change.file_path.as_str();
+                            let display = if path.len() > 28 {
+                                format!("{}..", &path[..26])
+                            } else {
+                                path.to_string()
+                            };
+                            ListItem::new(Line::from(vec![
+                                Span::styled(marker, style),
+                                Span::styled(display, style),
+                            ]))
+                        })
+                        .collect();
+                    let file_list = List::new(file_items);
+                    let mut file_state =
+                        ListState::default().with_selected(Some(clamped_file_idx));
+                    frame.render_stateful_widget(file_list, main_split[0], &mut file_state);
+
                     let mut lines: Vec<Line> = Vec::new();
-                    for change_id in change_ids {
-                        if let Ok(Some(change)) = store::get_change(&change_id) {
-                            for line in change.diff.lines() {
-                                let s = line.to_string();
-                                let span = if s.starts_with('+') && !s.starts_with("+++") {
-                                    Span::styled(s, Style::new().fg(Color::Green))
-                                } else if s.starts_with('-') && !s.starts_with("---") {
-                                    Span::styled(s, Style::new().fg(Color::Red))
-                                } else {
-                                    Span::raw(s)
-                                };
-                                lines.push(Line::from(span));
-                            }
+                    if let Some(change) = changes.get(clamped_file_idx) {
+                        for line in change.diff.lines() {
+                            let s = line.to_string();
+                            let span = if s.starts_with('+') && !s.starts_with("+++") {
+                                Span::styled(s, Style::new().fg(Color::Green))
+                            } else if s.starts_with('-') && !s.starts_with("---") {
+                                Span::styled(s, Style::new().fg(Color::Red))
+                            } else {
+                                Span::raw(s)
+                            };
+                            lines.push(Line::from(span));
                         }
                     }
                     let total_lines = lines.len();
@@ -461,11 +810,11 @@ fn render(
                     let diff = Paragraph::new(content)
                         .wrap(Wrap { trim: false })
                         .scroll((clamped_scroll, 0));
-                    frame.render_widget(diff, diff_chunks[1]);
+                    frame.render_widget(diff, main_split[1]);
                 }
             }
             let hint = Paragraph::new(Span::styled(
-                "j/k=scroll  h/esc=back",
+                "j/k=file  n/space/p=scroll  h/esc=back",
                 theme::header_hint(),
             ));
             frame.render_widget(hint, diff_chunks[2]);
@@ -473,7 +822,7 @@ fn render(
         View::Sessions { selected } => {
             if sessions.is_empty() {
                 let empty = Paragraph::new(Span::styled("(no sessions)", theme::header_hint()));
-                frame.render_widget(empty, chunks[1]);
+                frame.render_widget(empty, main_chunk);
             } else {
                 let items: Vec<ListItem> = sessions
                     .iter()
@@ -499,22 +848,31 @@ fn render(
                         ];
                         let mut lines = vec![Line::from(spans)];
                         let drafts = store::list_drafts(&session.id).unwrap_or_default();
+                        let max_subject = width.saturating_sub(12);
                         for (draft_idx, draft) in drafts.iter().enumerate() {
-                            lines.push(Line::from(Span::styled(
-                                format!(
-                                    "    - [{}] {}",
-                                    draft_idx + 1,
-                                    grouping::subject_line(&draft.message)
-                                ),
-                                theme::commit_msg(false),
-                            )));
+                            if draft.message.contains("(generating...)") {
+                                let spin = SPINNER[spinner_frame];
+                                lines.push(Line::from(Span::styled(
+                                    format!("    - [{}] {} ...", draft_idx + 1, spin),
+                                    theme::commit_msg(false),
+                                )));
+                            } else {
+                                lines.push(Line::from(Span::styled(
+                                    format!(
+                                        "    - [{}] {}",
+                                        draft_idx + 1,
+                                        grouping::subject_line_truncated(&draft.message, max_subject)
+                                    ),
+                                    theme::commit_msg(false),
+                                )));
+                            }
                         }
                         ListItem::new(Text::from(lines))
                     })
                     .collect();
                 let list = List::new(items);
                 let mut state = ListState::default().with_selected(Some(*selected));
-                frame.render_stateful_widget(list, chunks[1], &mut state);
+                frame.render_stateful_widget(list, main_chunk, &mut state);
             }
         }
         View::EditBranch { session_idx: _, buffer } => {
@@ -530,7 +888,7 @@ fn render(
                     theme::header_hint(),
                 )),
             ]));
-            frame.render_widget(para, chunks[1]);
+            frame.render_widget(para, main_chunk);
         }
         View::EditCommit {
             session_idx: _,
@@ -549,7 +907,7 @@ fn render(
                     theme::header_hint(),
                 )),
             ]));
-            frame.render_widget(para, chunks[1]);
+            frame.render_widget(para, main_chunk);
         }
         View::Commits { session_idx, selected } => {
             if let Some(session) = sessions.get(*session_idx) {
@@ -573,7 +931,7 @@ fn render(
                     Constraint::Length(2),
                     Constraint::Min(0),
                 ])
-                .split(chunks[1]);
+                .split(main_chunk);
                 frame.render_widget(header, header_area[0]);
 
                 let drafts = store::list_drafts(&session.id).unwrap_or_default();
@@ -584,24 +942,34 @@ fn render(
                     ));
                     frame.render_widget(empty, header_area[1]);
                 } else {
+                    let spin = SPINNER[spinner_frame];
+                    let max_subject = width.saturating_sub(12);
                     let items: Vec<ListItem> = drafts
                         .iter()
                         .enumerate()
                         .map(|(draft_idx, draft)| {
                             let marker = if draft_idx == *selected { "> " } else { "  " };
                             let msg_style = theme::commit_msg(draft_idx == *selected);
-                            ListItem::new(Line::from(vec![
-                                Span::raw("  "),
-                                Span::styled(marker, msg_style),
-                                Span::styled(
-                                    format!(
-                                        "[{}] {}",
-                                        draft_idx + 1,
-                                        grouping::subject_line(&draft.message)
+                            if draft.message.contains("(generating...)") {
+                                ListItem::new(Line::from(vec![
+                                    Span::raw("  "),
+                                    Span::styled(marker, msg_style),
+                                    Span::styled(format!("[{}] {} ...", draft_idx + 1, spin), msg_style),
+                                ]))
+                            } else {
+                                ListItem::new(Line::from(vec![
+                                    Span::raw("  "),
+                                    Span::styled(marker, msg_style),
+                                    Span::styled(
+                                        format!(
+                                            "[{}] {}",
+                                            draft_idx + 1,
+                                            grouping::subject_line_truncated(&draft.message, max_subject)
+                                        ),
+                                        msg_style,
                                     ),
-                                    msg_style,
-                                ),
-                            ]))
+                                ]))
+                            }
                         })
                         .collect();
                     let list = List::new(items);
@@ -610,6 +978,50 @@ fn render(
                 }
             }
         }
+    }
+
+    if let Some(menu) = slash_menu {
+        let area = frame.area();
+        let menu_width = 40u16;
+        let menu_height = (menu.items.len() + 2) as u16 + 2;
+        let popup = ratatui::layout::Rect {
+            x: area.x + (area.width.saturating_sub(menu_width)) / 2,
+            y: area.y + (area.height.saturating_sub(menu_height)) / 2,
+            width: menu_width,
+            height: menu_height,
+        };
+        let block = Block::default()
+            .title(if menu.level == 0 {
+                " / "
+            } else if menu.level == 1 {
+                " Models "
+            } else {
+                " Ollama model "
+            })
+            .borders(Borders::ALL)
+            .border_style(theme::header_title());
+        let items: Vec<ListItem> = menu
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, s)| {
+                let style = if idx == menu.selected {
+                    theme::selected()
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(Span::styled(
+                    format!("  {}  {}", if idx == menu.selected { ">" } else { " " }, s),
+                    style,
+                )))
+            })
+            .collect();
+        let list = List::new(items);
+        let inner = block.inner(popup);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(block, popup);
+        let mut list_state = ListState::default().with_selected(Some(menu.selected));
+        frame.render_stateful_widget(list, inner, &mut list_state);
     }
 }
 

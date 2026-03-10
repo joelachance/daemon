@@ -25,6 +25,35 @@ pub fn subject_line_truncated(full_message: &str, max_chars: usize) -> String {
     }
 }
 
+fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else if max_chars <= 3 {
+        s.chars().take(max_chars).collect()
+    } else {
+        let mut out: String = s.chars().take(max_chars - 3).collect();
+        out.push_str("...");
+        out
+    }
+}
+
+/// Format subject + body for list display. Subject on first line, body truncated on second.
+pub fn format_message_for_list(full_message: &str, max_subject: usize, max_body: usize) -> Vec<String> {
+    let subject = subject_line_truncated(full_message, max_subject);
+    let body = full_message
+        .lines()
+        .skip(1)
+        .skip_while(|l| l.trim().is_empty())
+        .next()
+        .map(|b| truncate_with_ellipsis(b.trim(), max_body))
+        .unwrap_or_default();
+    if body.is_empty() {
+        vec![subject]
+    } else {
+        vec![subject, format!("    {}", body)]
+    }
+}
+
 const CONVERSATION_PHRASES: &[&str] = &[
     "ok, here's",
     "here's some",

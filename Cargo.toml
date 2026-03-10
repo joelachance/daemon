@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["llama-embedded"]
 llama-embedded = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:hf-hub"]
 
 [dependencies]

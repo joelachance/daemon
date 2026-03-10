@@ -1,3 +1,4 @@
+use crate::path;
 use crate::session::{Change, ChangeLineRange, DraftCommit, DraftStatus, ToolCall};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -5,6 +6,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::SystemTime;
 use time::OffsetDateTime;
 
 static CONN: Mutex<Option<Connection>> = Mutex::new(None);
@@ -102,6 +104,7 @@ pub fn init() -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
         ensure_sessions_columns(conn)?;
+        migrate_normalize_repo_paths(conn)?;
         Ok(())
     })
 }
@@ -125,6 +128,30 @@ pub fn db_path() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".vibe-commits").join("db.sqlite"))
 }
 
+fn refresh_signal_path() -> Result<PathBuf, String> {
+    db_path().map(|p| {
+        p.parent()
+            .map(|parent| parent.join("sessions_updated"))
+            .unwrap_or_else(|| p.with_file_name("sessions_updated"))
+    })
+}
+
+pub fn touch_refresh_signal() {
+    let path = match refresh_signal_path() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, OffsetDateTime::now_utc().unix_timestamp().to_string());
+}
+
+pub fn refresh_signal_mtime() -> Option<SystemTime> {
+    let path = refresh_signal_path().ok()?;
+    fs::metadata(&path).ok()?.modified().ok()
+}
+
 pub fn upsert_session(
     session_id: &str,
     ide: &str,
@@ -134,6 +161,7 @@ pub fn upsert_session(
     first_prompt: Option<&str>,
 ) -> Result<(), String> {
     let now = now_ts();
+    let repo_path = path::normalize_repo_path(repo_path);
     with_conn(|conn| {
         conn.execute(
         "INSERT INTO sessions (id, ide, repo_path, base_commit_sha, suggested_branch, first_prompt, started_at)
@@ -159,7 +187,9 @@ pub fn upsert_session(
     )
     .map_err(|err| err.to_string())?;
         Ok(())
-    })
+    })?;
+    touch_refresh_signal();
+    Ok(())
 }
 
 pub fn touch_session(session_id: &str, seen_at: i64) -> Result<(), String> {
@@ -170,7 +200,9 @@ pub fn touch_session(session_id: &str, seen_at: i64) -> Result<(), String> {
         )
         .map_err(|err| err.to_string())?;
         Ok(())
-    })
+    })?;
+    touch_refresh_signal();
+    Ok(())
 }
 
 pub fn set_session_source_status(session_id: &str, status: Option<&str>) -> Result<(), String> {
@@ -181,7 +213,9 @@ pub fn set_session_source_status(session_id: &str, status: Option<&str>) -> Resu
         )
         .map_err(|err| err.to_string())?;
         Ok(())
-    })
+    })?;
+    touch_refresh_signal();
+    Ok(())
 }
 
 pub fn set_session_branch(session_id: &str, branch: &str) -> Result<(), String> {
@@ -214,7 +248,9 @@ pub fn mark_session_ended(session_id: &str) -> Result<(), String> {
         )
         .map_err(|err| err.to_string())?;
         Ok(())
-    })
+    })?;
+    touch_refresh_signal();
+    Ok(())
 }
 
 pub fn insert_turn(
@@ -495,6 +531,7 @@ pub fn list_unassigned_changes(session_id: &str) -> Result<Vec<Change>, String> 
 }
 
 pub fn list_open_sessions_for_repo(repo_path: &str) -> Result<Vec<SessionInfo>, String> {
+    let repo_path = path::normalize_repo_path(repo_path);
     with_conn(|conn| {
         let mut stmt = conn
         .prepare(
@@ -680,6 +717,28 @@ fn ensure_sessions_columns(conn: &Connection) -> Result<(), String> {
         "source_status",
         "ALTER TABLE sessions ADD COLUMN source_status TEXT",
     )?;
+    Ok(())
+}
+
+fn migrate_normalize_repo_paths(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("SELECT id, repo_path FROM sessions")
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<usize, String>(0)?, row.get::<usize, String>(1)?)))
+        .map_err(|err| err.to_string())?;
+    let mut update = conn
+        .prepare("UPDATE sessions SET repo_path = ?2 WHERE id = ?1")
+        .map_err(|err| err.to_string())?;
+    for row in rows {
+        let (id, repo_path) = row.map_err(|err| err.to_string())?;
+        let normalized = path::normalize_repo_path(&repo_path);
+        if normalized != repo_path {
+            update
+                .execute(params![id, normalized])
+                .map_err(|err| err.to_string())?;
+        }
+    }
     Ok(())
 }
 

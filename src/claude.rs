@@ -1,4 +1,5 @@
 use crate::daemon;
+use crate::git;
 use crate::session::TokenUsage;
 use crate::store;
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,17 @@ pub fn poll_assistant_responses(
     Ok(emitted)
 }
 
+pub fn poll_all_assistant_responses(git_stdout: bool, compact: bool) -> Result<usize, String> {
+    let mut emitted = 0usize;
+    for root in discover_claude_repo_roots()? {
+        match poll_assistant_responses(&root, git_stdout, compact) {
+            Ok(count) => emitted += count,
+            Err(err) => eprintln!("claude poll root {} failed: {err}", root.display()),
+        }
+    }
+    Ok(emitted)
+}
+
 fn active_window_secs() -> i64 {
     env::var("GG_ACTIVE_WINDOW_SECS")
         .ok()
@@ -98,12 +110,70 @@ fn claude_projects_dir() -> Result<PathBuf, String> {
         .join("projects"))
 }
 
+fn discover_claude_repo_roots() -> Result<Vec<PathBuf>, String> {
+    let mut roots: HashMap<String, PathBuf> = HashMap::new();
+    if let Ok(value) = env::var("GG_CLAUDE_REPO") {
+        if !value.trim().is_empty() {
+            if let Some(root) = canonical_repo_root(Path::new(value.trim())) {
+                roots.insert(root.to_string_lossy().to_string(), root);
+            }
+        }
+    }
+    if let Ok(root) = git::repo_root() {
+        if let Some(repo) = canonical_repo_root(Path::new(&root)) {
+            roots.insert(repo.to_string_lossy().to_string(), repo);
+        }
+    }
+    let projects_dir = claude_projects_dir()?;
+    if let Ok(entries) = fs::read_dir(projects_dir) {
+        for entry in entries {
+            let entry = match entry {
+                Ok(item) => item,
+                Err(_) => continue,
+            };
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = match entry.file_name().to_str() {
+                Some(value) => value.to_string(),
+                None => continue,
+            };
+            let decoded = decode_project_dir_name(&name);
+            if decoded.is_empty() {
+                continue;
+            }
+            if let Some(repo) = canonical_repo_root(Path::new(&decoded)) {
+                roots.insert(repo.to_string_lossy().to_string(), repo);
+            }
+        }
+    }
+    let mut out = roots.into_values().collect::<Vec<_>>();
+    out.sort();
+    Ok(out)
+}
+
 fn project_dir_for_root(root: &Path, projects_dir: &Path) -> PathBuf {
     projects_dir.join(encode_project_dir_name(root))
 }
 
 fn encode_project_dir_name(root: &Path) -> String {
     root.to_string_lossy().replace('/', "-")
+}
+
+fn decode_project_dir_name(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    if value.starts_with('-') {
+        return value.replace('-', "/");
+    }
+    value.to_string()
+}
+
+fn canonical_repo_root(path: &Path) -> Option<PathBuf> {
+    let text = path.to_string_lossy().to_string();
+    let root = git::repo_root_from(&text).ok()?;
+    Path::new(&root).canonicalize().ok()
 }
 
 fn process_session_file(

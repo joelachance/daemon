@@ -134,14 +134,19 @@ fn parse_commit_message(text: &str) -> Result<CommitMessage, String> {
 
     let start = cleaned.find('{');
     let end = cleaned.rfind('}');
-    match (start, end) {
+    let err = match (start, end) {
         (Some(start), Some(end)) if end > start => {
             let slice = &cleaned[start..=end];
             serde_json::from_str::<CommitMessage>(slice)
                 .map_err(|err| format!("bedrock: invalid json ({err})"))
         }
         _ => Err("bedrock: could not find json object".to_string()),
+    };
+    if let Err(ref e) = err {
+        let preview: String = text.chars().take(500).collect();
+        eprintln!("daemon: bedrock parse failed: {}; response preview: {:?}", e, preview);
     }
+    err
 }
 
 pub fn infer_commit_message_blocking(

@@ -1,9 +1,11 @@
 use crate::daemon;
+use crate::git;
 use crate::session::TokenUsage;
+use crate::store;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -70,8 +72,8 @@ pub fn poll_assistant_messages(
     };
     let active_sessions =
         fetch_recent_active_session_ids_for_repo(&conn, &root_str, now, active_window_secs)?;
-    for session_id in active_sessions {
-        daemon::upsert_session_presence(&session_id, "opencode", &root, None)?;
+    for session_id in &active_sessions {
+        daemon::upsert_session_presence(session_id, "opencode", &root, None)?;
     }
     let cutoff = now.saturating_sub(active_window_secs);
     let mut parts = fetch_assistant_parts_for_repo(&conn, &root_str, Some(cutoff))?;
@@ -204,10 +206,32 @@ pub fn poll_assistant_messages(
         }
     }
 
+    let active_ids: HashSet<_> = active_sessions.into_iter().collect();
+    for item in store::list_sessions_for_repo(&root_str)? {
+        if item.ide.eq_ignore_ascii_case("opencode")
+            && item.ended_at.is_none()
+            && !active_ids.contains(&item.id)
+        {
+            let _ = store::mark_session_ended(&item.id);
+            let _ = store::set_session_source_status(&item.id, Some("ended"));
+        }
+    }
+
     if state_dirty {
         save_state(&root, &state)?;
     }
 
+    Ok(emitted)
+}
+
+pub fn poll_all_assistant_messages(git_stdout: bool, compact: bool) -> Result<usize, String> {
+    let mut emitted = 0usize;
+    for root in discover_opencode_repo_roots()? {
+        match poll_assistant_messages(&root, git_stdout, compact) {
+            Ok(count) => emitted += count,
+            Err(err) => eprintln!("opencode poll root {} failed: {err}", root.display()),
+        }
+    }
     Ok(emitted)
 }
 
@@ -371,6 +395,64 @@ fn fetch_recent_active_session_ids_for_repo(
         }
     }
     Ok(out)
+}
+
+fn discover_opencode_repo_roots() -> Result<Vec<PathBuf>, String> {
+    let mut roots: HashMap<String, PathBuf> = HashMap::new();
+    if let Ok(value) = env::var("GG_OPENCODE_REPO") {
+        if !value.trim().is_empty() {
+            if let Some(root) = canonical_repo_root(Path::new(value.trim())) {
+                roots.insert(root.to_string_lossy().to_string(), root);
+            }
+        }
+    }
+    if let Ok(root) = git::repo_root() {
+        if let Some(repo) = canonical_repo_root(Path::new(&root)) {
+            roots.insert(repo.to_string_lossy().to_string(), repo);
+        }
+    }
+    let conn = match open_opencode_db()? {
+        Some(conn) => conn,
+        None => {
+            let mut out = roots.into_values().collect::<Vec<_>>();
+            out.sort();
+            return Ok(out);
+        }
+    };
+    let mut stmt = conn
+        .prepare(
+            "select distinct s.directory, pr.worktree
+             from session s
+             join project pr on pr.id = s.project_id",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            let dir: Option<String> = row.get(0)?;
+            let worktree: Option<String> = row.get(1)?;
+            Ok((dir, worktree))
+        })
+        .map_err(|err| err.to_string())?;
+    for row in rows {
+        let (dir, worktree) = row.map_err(|err| err.to_string())?;
+        for candidate in [dir, worktree].into_iter().flatten() {
+            if candidate.trim().is_empty() {
+                continue;
+            }
+            if let Some(root) = canonical_repo_root(Path::new(candidate.trim())) {
+                roots.insert(root.to_string_lossy().to_string(), root);
+            }
+        }
+    }
+    let mut out = roots.into_values().collect::<Vec<_>>();
+    out.sort();
+    Ok(out)
+}
+
+fn canonical_repo_root(path: &Path) -> Option<PathBuf> {
+    let text = path.to_string_lossy().to_string();
+    let root = git::repo_root_from(&text).ok()?;
+    Path::new(&root).canonicalize().ok()
 }
 
 fn parse_tokens(message_json: &Value) -> Option<TokenUsage> {

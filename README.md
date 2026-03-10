@@ -36,8 +36,8 @@ gg install-model
   - `PATCH /sessions/:id/branch`
   - `PATCH /drafts/:id/message`
   - `POST /sessions/:id/drafts/approve`
-  - `GET /config/llm_provider` – returns `{ "provider": "ollama" | "openai" | "anthropic" }`
-  - `PATCH /config/llm_provider` – body `{ "provider": "ollama" | "openai" | "anthropic" }`
+  - `GET /config/llm_provider` – returns `{ "provider": "ollama" | "openai" | "anthropic" | "llama" }`
+  - `PATCH /config/llm_provider` – body `{ "provider": "ollama" | "openai" | "anthropic" | "llama" }`
 
 ## Environment
 - `GG_SOCKET` override daemon socket path
@@ -46,7 +46,8 @@ gg install-model
 - `GG_CLAUDE_DIR` override Claude directory
 - `GG_OPENCODE_DB` override OpenCode DB path
 - `GG_DAEMON_LOG=0` hide the daemon log panel at the bottom of the dashboard
-- **Commit messages** use an LLM (required). Provider priority: OpenAI (if `OPENAI_API_KEY`) > Anthropic (if `ANTHROPIC_API_KEY`) > Ollama (default).
+- **Commit messages** use an LLM (required). Provider priority: OpenAI (if `OPENAI_API_KEY`) > Anthropic (if `ANTHROPIC_API_KEY`) > Llama embedded (default) > Ollama.
+- **Embedded (Llama)**: Default when no API keys. Run `gg install-model` to download SmolLM2-360M-Instruct-Q4_K_M.gguf from Hugging Face. Override with `GG_LLAMA_MODEL` (path to GGUF file). For better quality, try 1.7B: set `GG_LLAMA_MODEL` to a SmolLM2-1.7B-Instruct GGUF path.
 - **Ollama**: Install from [ollama.com](https://ollama.com), run `ollama pull llama3.2` (or preferred model), ensure `ollama serve` is running. Uses `http://localhost:11434` by default. Override with `GG_OLLAMA_BASE_URL`, `GG_OLLAMA_MODEL`.
-- **Model selection**: Press `/` in the dashboard for the slash menu → Models → choose OpenAI, Anthropic, or Ollama. For Ollama, select a model from your installed list.
+- **Model selection**: Press `/` in the dashboard for the slash menu → Models → choose OpenAI, Anthropic, Llama (embedded), or Ollama. For Ollama, select a model from your installed list.
 - Override with `GG_OPENAI_MODEL`, `GG_ANTHROPIC_MODEL`.

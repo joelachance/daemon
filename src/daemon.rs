@@ -1,8 +1,9 @@
 use crate::claude;
-use crate::daemon_log;
-use crate::llm;
 use crate::cursor;
+use crate::daemon_log;
 use crate::git;
+use crate::llm;
+use crate::path;
 use crate::grouping;
 use crate::opencode;
 use crate::session::{Change, ChangeLineRange, TokenUsage, ToolCall, ToolTokenUsage};
@@ -293,10 +294,11 @@ fn handle_event(request: &Request) -> Result<EventResult, String> {
         .or_else(|| request.summary.clone())
         .unwrap_or_else(|| "assistant response".to_string());
     let suggested = suggest_branch_name_for_session(&prompt, session_id);
+    let repo = path::normalize_repo_path(&root);
     store::upsert_session(
         session_id,
         ide,
-        &root,
+        &repo,
         &base_commit_sha,
         &suggested,
         if prompt.is_empty() {
@@ -349,11 +351,10 @@ pub fn upsert_session_presence(
     repo_root: &Path,
     prompt_hint: Option<&str>,
 ) -> Result<(), String> {
-    let repo = repo_root
+    let canonical = repo_root
         .canonicalize()
-        .map_err(|err| err.to_string())?
-        .to_string_lossy()
-        .to_string();
+        .map_err(|err| err.to_string())?;
+    let repo = path::normalize_repo_path(&canonical.to_string_lossy());
     let base_commit_sha = git::head_commit_in_root(&repo)?;
     let prompt = prompt_hint.unwrap_or_default();
     let suggested = suggest_branch_name_for_session(prompt, session_id);

@@ -97,6 +97,7 @@ pub fn init() -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_turns_session_ts ON turns(session_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_changes_session_capture ON changes(session_id, captured_at);
         CREATE INDEX IF NOT EXISTS idx_drafts_session_order ON drafts(session_id, draft_order);
+        CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT);
         "#,
     )
     .map_err(|err| err.to_string())?;
@@ -697,4 +698,41 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, sql: &str) -> Res
     }
     conn.execute(sql, []).map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn get_config(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = ?1",
+            params![key],
+            |row| row.get::<usize, String>(0),
+        )
+        .optional()
+        .map_err(|err| err.to_string())?;
+    Ok(value.and_then(|v| if v.trim().is_empty() { None } else { Some(v) }))
+}
+
+fn set_config(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO config (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+        params![key, value],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+pub fn get_llm_provider() -> Result<Option<String>, String> {
+    with_conn(|conn| get_config(conn, "llm_provider"))
+}
+
+pub fn set_llm_provider(provider: &str) -> Result<(), String> {
+    with_conn(|conn| set_config(conn, "llm_provider", provider))
+}
+
+pub fn get_ollama_model() -> Result<Option<String>, String> {
+    with_conn(|conn| get_config(conn, "ollama_model"))
+}
+
+pub fn set_ollama_model(model: &str) -> Result<(), String> {
+    with_conn(|conn| set_config(conn, "ollama_model", model))
 }

@@ -43,6 +43,32 @@ pub fn run_api_server() -> Result<(), String> {
 }
 
 fn handle(method: &str, path: &str, body: &str) -> (u16, String) {
+    if method == "GET" && path == "/config/llm_provider" {
+        return match store::get_llm_provider()
+            .and_then(|p| serde_json::to_string(&serde_json::json!({ "provider": p })).map_err(|e| e.to_string()))
+        {
+            Ok(value) => (200, value),
+            Err(err) => error(err),
+        };
+    }
+    if method == "PATCH" && path == "/config/llm_provider" {
+        let json: serde_json::Value = match serde_json::from_str(body) {
+            Ok(value) => value,
+            Err(err) => return error(err.to_string()),
+        };
+        let provider = json.get("provider").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if provider.is_empty() {
+            return error("provider is required".to_string());
+        }
+        let valid = ["openai", "anthropic", "ollama"];
+        if !valid.contains(&provider.to_lowercase().as_str()) {
+            return error(format!("provider must be one of: {}", valid.join(", ")));
+        }
+        return match store::set_llm_provider(provider) {
+            Ok(_) => (200, "{\"ok\":true}".to_string()),
+            Err(err) => error(err),
+        };
+    }
     if method == "GET" && path == "/sessions" {
         match crate::git::repo_root()
             .and_then(|root| store::list_sessions_for_repo(&root))
@@ -122,6 +148,28 @@ fn handle(method: &str, path: &str, body: &str) -> (u16, String) {
                     serde_json::to_string(&serde_json::json!({ "commits": commits }))
                         .unwrap_or_else(|_| "{\"ok\":true}".to_string()),
                 ),
+                Err(err) => error(err),
+            };
+        }
+    }
+    if method == "PATCH" && path.starts_with("/drafts/") && path.ends_with("/message") {
+        let pieces: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if pieces.len() == 3 {
+            let json: serde_json::Value = match serde_json::from_str(body) {
+                Ok(value) => value,
+                Err(err) => return error(err.to_string()),
+            };
+            let message = json
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if message.is_empty() {
+                return error("message is required".to_string());
+            }
+            return match store::update_draft_message(pieces[1], &message) {
+                Ok(_) => (200, "{\"ok\":true}".to_string()),
                 Err(err) => error(err),
             };
         }

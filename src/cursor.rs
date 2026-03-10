@@ -1,4 +1,5 @@
 use crate::daemon;
+use crate::git;
 use crate::session::TokenUsage;
 use crate::store;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -8,9 +9,17 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use sysinfo::System;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use sysinfo::{ProcessRefreshKind, System};
 use time::OffsetDateTime;
+
+const CURSOR_RUNNING_CACHE_SECS: u64 = 30;
+const CURSOR_ROOTS_CACHE_SECS: u64 = 60;
+const CURSOR_GLOBAL_SCAN_LIMIT: usize = 50;
+
+static CURSOR_RUNNING_CACHE: Mutex<Option<(bool, Instant)>> = Mutex::new(None);
+static CURSOR_ROOTS_CACHE: Mutex<Option<(Vec<PathBuf>, Instant)>> = Mutex::new(None);
 
 const DEFAULT_GLOBAL_DB: &str =
     "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb";
@@ -30,6 +39,16 @@ struct CursorSession {
     bubble_count: Option<usize>,
     bubble_ids: Vec<String>,
     attached_files: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceComposerSummary {
+    composer_id: String,
+    status: Option<String>,
+    last_updated_at: Option<i64>,
+    created_at: Option<i64>,
+    name: Option<String>,
+    subtitle: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -52,18 +71,66 @@ struct CursorState {
 }
 
 pub fn cursor_running() -> bool {
-    let mut system = System::new_all();
-    system.refresh_processes();
+    let now = Instant::now();
+    {
+        let cache = CURSOR_RUNNING_CACHE.lock().unwrap();
+        if let Some((cached, at)) = *cache {
+            if now.duration_since(at) < Duration::from_secs(CURSOR_RUNNING_CACHE_SECS) {
+                return cached;
+            }
+        }
+    }
+    let result = cursor_running_uncached();
+    {
+        let mut cache = CURSOR_RUNNING_CACHE.lock().unwrap();
+        *cache = Some((result, now));
+    }
+    result
+}
+
+fn cursor_running_uncached() -> bool {
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessRefreshKind::new());
     system.processes().values().any(|process| {
         let name = process.name().to_ascii_lowercase();
-        if name.contains("cursor") {
-            return true;
-        }
-        process
-            .cmd()
-            .iter()
-            .any(|part| part.to_ascii_lowercase().contains("cursor"))
+        name.contains("cursor")
     })
+}
+
+fn get_cursor_repo_roots() -> Result<Vec<PathBuf>, String> {
+    let now = Instant::now();
+    {
+        let cache = CURSOR_ROOTS_CACHE.lock().unwrap();
+        if let Some((ref roots, at)) = *cache {
+            if now.duration_since(at) < Duration::from_secs(CURSOR_ROOTS_CACHE_SECS) {
+                return Ok(roots.clone());
+            }
+        }
+    }
+    let roots = discover_cursor_repo_roots()?;
+    {
+        let mut cache = CURSOR_ROOTS_CACHE.lock().unwrap();
+        *cache = Some((roots.clone(), now));
+    }
+    Ok(roots)
+}
+
+pub fn poll_all_completed_sessions(git_stdout: bool, compact: bool) -> Result<usize, String> {
+    let mut emitted = 0usize;
+    let roots = get_cursor_repo_roots()?;
+    if env::var("GG_DEBUG_CURSOR_ROOTS").ok().as_deref() == Some("1") {
+        eprintln!("cursor roots discovered: {}", roots.len());
+        for root in roots.iter().take(20) {
+            eprintln!("cursor root: {}", root.display());
+        }
+    }
+    for root in roots {
+        match poll_completed_sessions(&root, git_stdout, compact) {
+            Ok(count) => emitted += count,
+            Err(err) => eprintln!("cursor poll root {} failed: {err}", root.display()),
+        }
+    }
+    Ok(emitted)
 }
 
 pub fn poll_completed_sessions(
@@ -75,15 +142,40 @@ pub fn poll_completed_sessions(
     let mut state = load_state(&root);
     let conn = open_cursor_db()?;
     let fetch = fetch_sessions_for_repo(&conn, &root)?;
-    let sessions = fetch.sessions;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let cutoff = now.saturating_sub(active_window_secs());
+    let mut sessions = fetch.sessions;
+    sessions.retain(|session| {
+        session
+            .last_updated_at
+            .or(session.created_at)
+            .map(|value| value >= cutoff)
+            .unwrap_or(false)
+    });
+    if env::var("GG_DEBUG_CURSOR_ROOTS").ok().as_deref() == Some("1") {
+        eprintln!(
+            "cursor poll root={} sessions={} workspace_candidates={} fallback_used={} scanned={} rejected={} hydrated_found={} hydrated_missing={}",
+            root.display(),
+            sessions.len(),
+            fetch.workspace_candidates,
+            fetch.fallback_used,
+            fetch.scanned,
+            fetch.rejected,
+            fetch.hydrated_found,
+            fetch.hydrated_missing
+        );
+    }
     let mut emitted = 0usize;
+    let mut seen_ids: HashSet<String> = HashSet::new();
 
     for session in sessions {
         let session_id = session.composer_id.clone();
+        seen_ids.insert(session_id.clone());
         daemon::upsert_session_presence(&session_id, "cursor", &root, None)?;
         store::set_session_source_status(&session_id, Some(&session.status))?;
         let seen_at = session
             .last_updated_at
+            .or(session.created_at)
             .unwrap_or_else(|| OffsetDateTime::now_utc().unix_timestamp());
         store::touch_session(&session_id, seen_at)?;
         let mut last_prompt: Option<PromptSnapshot> = None;
@@ -270,6 +362,19 @@ pub fn poll_completed_sessions(
         save_state(&root, &state)?;
     }
 
+    if !seen_ids.is_empty() {
+        let repo = root.to_string_lossy().to_string();
+        for item in store::list_sessions_for_repo(&repo)? {
+            if item.ide.eq_ignore_ascii_case("cursor")
+                && item.ended_at.is_none()
+                && !seen_ids.contains(&item.id)
+            {
+                let _ = store::mark_session_ended(&item.id);
+                let _ = store::set_session_source_status(&item.id, Some("ended"));
+            }
+        }
+    }
+
     Ok(emitted)
 }
 
@@ -299,13 +404,13 @@ fn expand_tilde(path: &str) -> String {
 fn fetch_sessions_for_repo(conn: &Connection, root: &Path) -> Result<CursorFetchResult, String> {
     let repo_str = root.to_string_lossy().to_string();
     let repo_norm = normalize_path_like(&repo_str);
-    let workspace_ids = discover_workspace_composer_ids(root)?;
+    let workspace = discover_workspace_composers(root)?;
 
     let mut result = CursorFetchResult::default();
-    result.workspace_candidates = workspace_ids.len();
+    result.workspace_candidates = workspace.len();
 
-    if !workspace_ids.is_empty() {
-        hydrate_sessions_by_ids(conn, &workspace_ids, &mut result)?;
+    if !workspace.is_empty() {
+        hydrate_sessions_by_summaries(conn, &workspace, &mut result)?;
         if !result.sessions.is_empty() {
             return Ok(result);
         }
@@ -316,16 +421,17 @@ fn fetch_sessions_for_repo(conn: &Connection, root: &Path) -> Result<CursorFetch
     Ok(result)
 }
 
-fn hydrate_sessions_by_ids(
+fn hydrate_sessions_by_summaries(
     conn: &Connection,
-    composer_ids: &[String],
+    composers: &[WorkspaceComposerSummary],
     result: &mut CursorFetchResult,
 ) -> Result<(), String> {
     let mut stmt = conn
         .prepare("select cast(value as text) from cursorDiskKV where key = ?1")
         .map_err(|err| err.to_string())?;
 
-    for composer_id in composer_ids {
+    for composer in composers {
+        let composer_id = composer.composer_id.as_str();
         result.scanned += 1;
         let key = format!("composerData:{composer_id}");
         let payload: Option<String> = stmt
@@ -336,7 +442,9 @@ fn hydrate_sessions_by_ids(
             Some(value) if !value.trim().is_empty() => value,
             _ => {
                 result.hydrated_missing += 1;
-                result.rejected += 1;
+                result
+                    .sessions
+                    .push(build_workspace_cursor_session(composer));
                 continue;
             }
         };
@@ -344,14 +452,32 @@ fn hydrate_sessions_by_ids(
             Ok(value) => value,
             Err(_) => {
                 result.hydrated_missing += 1;
-                result.rejected += 1;
+                result
+                    .sessions
+                    .push(build_workspace_cursor_session(composer));
                 continue;
             }
         };
         result.hydrated_found += 1;
-        result
-            .sessions
-            .push(build_cursor_session(composer_id, &json));
+        let mut session = build_cursor_session(composer_id, &json);
+        if session.last_updated_at.is_none() {
+            session.last_updated_at = normalize_timestamp(composer.last_updated_at);
+        }
+        if session.created_at.is_none() {
+            session.created_at = normalize_timestamp(composer.created_at);
+        }
+        if session.name.is_none() {
+            session.name = composer.name.clone();
+        }
+        if session.subtitle.is_none() {
+            session.subtitle = composer.subtitle.clone();
+        }
+        session.status = composer
+            .status
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| "active".to_string());
+        result.sessions.push(session);
     }
 
     Ok(())
@@ -364,11 +490,12 @@ fn fetch_sessions_by_global_match(
 ) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
-            "select key, cast(value as text) from cursorDiskKV where key like 'composerData:%'",
+            "select key, cast(value as text) from cursorDiskKV where key like 'composerData:%' order by rowid desc limit ?1",
         )
         .map_err(|err| err.to_string())?;
+    let limit_i64 = CURSOR_GLOBAL_SCAN_LIMIT as i64;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([limit_i64], |row| {
             let key: String = row.get(0)?;
             let value: Option<String> = row.get(1)?;
             Ok((key, value))
@@ -422,8 +549,8 @@ fn build_cursor_session(composer_id: &str, json: &Value) -> CursorSession {
     CursorSession {
         composer_id: composer_id.to_string(),
         status,
-        last_updated_at: json.get("lastUpdatedAt").and_then(|v| v.as_i64()),
-        created_at: json.get("createdAt").and_then(|v| v.as_i64()),
+        last_updated_at: normalize_timestamp(json.get("lastUpdatedAt").and_then(|v| v.as_i64())),
+        created_at: normalize_timestamp(json.get("createdAt").and_then(|v| v.as_i64())),
         name: json
             .get("name")
             .and_then(|v| v.as_str())
@@ -451,6 +578,28 @@ fn build_cursor_session(composer_id: &str, json: &Value) -> CursorSession {
                     .collect::<Vec<String>>()
             })
             .unwrap_or_default(),
+    }
+}
+
+fn build_workspace_cursor_session(composer: &WorkspaceComposerSummary) -> CursorSession {
+    CursorSession {
+        composer_id: composer.composer_id.clone(),
+        status: composer
+            .status
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| "active".to_string()),
+        last_updated_at: normalize_timestamp(composer.last_updated_at),
+        created_at: normalize_timestamp(composer.created_at),
+        name: composer.name.clone(),
+        subtitle: composer.subtitle.clone(),
+        model_name: None,
+        context_tokens_used: None,
+        context_token_limit: None,
+        is_archived: None,
+        bubble_count: Some(0),
+        bubble_ids: Vec::new(),
+        attached_files: Vec::new(),
     }
 }
 
@@ -509,9 +658,9 @@ fn bubbles_after(last: Option<&str>, bubble_ids: &[String]) -> Vec<String> {
     match last {
         Some(last_id) => match bubble_ids.iter().position(|id| id == last_id) {
             Some(index) => bubble_ids.iter().skip(index + 1).cloned().collect(),
-            None => bubble_ids.to_vec(),
+            None => bubble_ids.iter().rev().take(1).cloned().collect::<Vec<_>>().into_iter().rev().collect(),
         },
-        None => bubble_ids.to_vec(),
+        None => bubble_ids.iter().rev().take(1).cloned().collect::<Vec<_>>().into_iter().rev().collect(),
     }
 }
 
@@ -581,7 +730,7 @@ fn save_state(root: &Path, state: &CursorState) -> Result<(), String> {
     fs::write(path, data).map_err(|err| err.to_string())
 }
 
-fn discover_workspace_composer_ids(root: &Path) -> Result<Vec<String>, String> {
+fn discover_workspace_composers(root: &Path) -> Result<Vec<WorkspaceComposerSummary>, String> {
     let workspace_root = workspace_storage_root()?;
     let entries = match fs::read_dir(&workspace_root) {
         Ok(entries) => entries,
@@ -589,7 +738,7 @@ fn discover_workspace_composer_ids(root: &Path) -> Result<Vec<String>, String> {
     };
 
     let repo_norm = normalize_path_like(&root.to_string_lossy());
-    let mut ids = HashSet::new();
+    let mut by_id: HashMap<String, WorkspaceComposerSummary> = HashMap::new();
 
     for entry in entries {
         let entry = match entry {
@@ -652,15 +801,52 @@ fn discover_workspace_composer_ids(root: &Path) -> Result<Vec<String>, String> {
                 .and_then(|v| v.as_str())
             {
                 if !id.trim().is_empty() {
-                    ids.insert(id.to_string());
+                    let status = item
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let last_updated_at = item.get("lastUpdatedAt").and_then(|v| v.as_i64());
+                    let created_at = item.get("createdAt").and_then(|v| v.as_i64());
+                    let name = item
+                        .get("name")
+                        .or_else(|| item.get("title"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let subtitle = item
+                        .get("subtitle")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let is_archived = item
+                        .get("isArchived")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let has_subagent_info = item.get("subagentInfo").is_some();
+                    if is_archived || has_subagent_info {
+                        continue;
+                    }
+                    by_id.insert(
+                        id.to_string(),
+                        WorkspaceComposerSummary {
+                            composer_id: id.to_string(),
+                            status,
+                            last_updated_at,
+                            created_at,
+                            name,
+                            subtitle,
+                        },
+                    );
                 }
             }
         }
     }
 
-    let mut out: Vec<String> = ids.into_iter().collect();
-    out.sort();
+    let mut out: Vec<WorkspaceComposerSummary> = by_id.into_values().collect();
+    out.sort_by(|a, b| a.composer_id.cmp(&b.composer_id));
     Ok(out)
+}
+
+fn normalize_timestamp(value: Option<i64>) -> Option<i64> {
+    value.map(|item| if item > 1_000_000_000_000 { item / 1000 } else { item })
 }
 
 fn workspace_storage_root() -> Result<PathBuf, String> {
@@ -676,6 +862,126 @@ fn workspace_storage_root() -> Result<PathBuf, String> {
         .join("Cursor")
         .join("User")
         .join("workspaceStorage"))
+}
+
+fn discover_cursor_repo_roots() -> Result<Vec<PathBuf>, String> {
+    let mut roots: HashSet<String> = HashSet::new();
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let cutoff = now.saturating_sub(active_window_secs());
+    if let Ok(value) = env::var("GG_CURSOR_REPO") {
+        if !value.trim().is_empty() {
+            if let Some(root) = canonical_repo_root(Path::new(value.trim())) {
+                roots.insert(root);
+            }
+        }
+    }
+    if let Ok(root) = git::repo_root() {
+        roots.insert(root);
+    }
+    if let Ok(workspace_root) = workspace_storage_root() {
+        if let Ok(entries) = fs::read_dir(workspace_root) {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(item) => item,
+                    Err(_) => continue,
+                };
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let ws_dir = entry.path();
+                let ws_json = ws_dir.join("workspace.json");
+                let ws_db = ws_dir.join("state.vscdb");
+                if !ws_json.exists() {
+                    continue;
+                }
+                if !ws_db.exists() {
+                    continue;
+                }
+                if !workspace_has_recent_activity(&ws_db, cutoff) {
+                    continue;
+                }
+                let folder = match fs::read_to_string(&ws_json)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .and_then(|json| json.get("folder").and_then(|v| v.as_str()).map(str::to_string))
+                {
+                    Some(value) => value,
+                    None => continue,
+                };
+                let path_like = normalize_path_like(&folder);
+                if path_like.is_empty() {
+                    continue;
+                }
+                if let Some(root) = canonical_repo_root(Path::new(&path_like)) {
+                    roots.insert(root);
+                }
+            }
+        }
+    }
+    let mut out = roots.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+    out.sort();
+    Ok(out)
+}
+
+fn workspace_has_recent_activity(db_path: &Path, cutoff: i64) -> bool {
+    let conn = match Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let raw: Option<String> = match conn.query_row(
+        "select cast(value as text) from ItemTable where key = 'composer.composerData'",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let raw = match raw {
+        Some(value) => value,
+        None => return false,
+    };
+    let json: Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let all = match json.get("allComposers").and_then(|v| v.as_array()) {
+        Some(value) => value,
+        None => return false,
+    };
+    all.iter().any(|item| {
+        if item
+            .get("isArchived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if item.get("subagentInfo").is_some() {
+            return false;
+        }
+        let ts = item
+            .get("lastUpdatedAt")
+            .and_then(|v| v.as_i64())
+            .or_else(|| item.get("createdAt").and_then(|v| v.as_i64()));
+        normalize_timestamp(ts).map(|value| value >= cutoff).unwrap_or(false)
+    })
+}
+
+fn active_window_secs() -> i64 {
+    env::var("GG_ACTIVE_WINDOW_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(900)
+}
+
+fn canonical_repo_root(path: &Path) -> Option<String> {
+    let text = path.to_string_lossy().to_string();
+    let root = git::repo_root_from(&text).ok()?;
+    Path::new(&root)
+        .canonicalize()
+        .ok()
+        .map(|item| item.to_string_lossy().to_string())
 }
 
 fn session_matches_repo(json: &Value, raw: &str, repo_norm: &str) -> bool {

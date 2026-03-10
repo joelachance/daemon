@@ -1,4 +1,6 @@
 use crate::claude;
+use crate::daemon_log;
+use crate::llm;
 use crate::cursor;
 use crate::git;
 use crate::grouping;
@@ -13,8 +15,8 @@ use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use time::OffsetDateTime;
 
 const DEFAULT_SOCKET: &str = "/tmp/vibe-commits.sock";
@@ -57,6 +59,9 @@ pub fn run_daemon(_start_stdin: bool) -> Result<(), String> {
         fs::remove_file(&socket).map_err(|err| err.to_string())?;
     }
     let listener = UnixListener::bind(&socket).map_err(|err| err.to_string())?;
+    let pid_path = pid_file_path();
+    fs::write(&pid_path, std::process::id().to_string()).map_err(|err| err.to_string())?;
+    let _guard = PidFileGuard::new(pid_path);
     start_cursor_poll_thread();
     start_claude_poll_thread();
     start_opencode_poll_thread();
@@ -86,17 +91,10 @@ fn start_cursor_poll_thread() {
         .unwrap_or(5);
     std::thread::spawn(move || loop {
         if cursor::cursor_running() {
-            let root = env::var("GG_CURSOR_REPO")
-                .ok()
-                .or_else(|| git::repo_root().ok());
-            if let Some(root) = root {
-                let git_stdout = parse_bool_env("GG_GIT_STDOUT").unwrap_or(false);
-                let compact = parse_bool_env("GG_COMPACT").unwrap_or(false);
-                if let Err(err) =
-                    cursor::poll_completed_sessions(Path::new(&root), git_stdout, compact)
-                {
-                    eprintln!("daemon: cursor poll error: {err}");
-                }
+            let git_stdout = parse_bool_env("GG_GIT_STDOUT").unwrap_or(false);
+            let compact = parse_bool_env("GG_COMPACT").unwrap_or(false);
+            if let Err(err) = cursor::poll_all_completed_sessions(git_stdout, compact) {
+                eprintln!("daemon: cursor poll error: {err}");
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(interval_secs));
@@ -111,20 +109,16 @@ fn start_claude_poll_thread() {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(5);
-    std::thread::spawn(move || loop {
-        let root = env::var("GG_CLAUDE_REPO")
-            .ok()
-            .or_else(|| git::repo_root().ok());
-        if let Some(root) = root {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        loop {
             let git_stdout = parse_bool_env("GG_GIT_STDOUT").unwrap_or(false);
             let compact = parse_bool_env("GG_COMPACT").unwrap_or(false);
-            if let Err(err) =
-                claude::poll_assistant_responses(Path::new(&root), git_stdout, compact)
-            {
+            if let Err(err) = claude::poll_all_assistant_responses(git_stdout, compact) {
                 eprintln!("daemon: claude poll error: {err}");
             }
+            std::thread::sleep(std::time::Duration::from_secs(interval_secs));
         }
-        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
     });
 }
 
@@ -136,20 +130,16 @@ fn start_opencode_poll_thread() {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(5);
-    std::thread::spawn(move || loop {
-        let root = env::var("GG_OPENCODE_REPO")
-            .ok()
-            .or_else(|| git::repo_root().ok());
-        if let Some(root) = root {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        loop {
             let git_stdout = parse_bool_env("GG_GIT_STDOUT").unwrap_or(false);
             let compact = parse_bool_env("GG_COMPACT").unwrap_or(false);
-            if let Err(err) =
-                opencode::poll_assistant_messages(Path::new(&root), git_stdout, compact)
-            {
+            if let Err(err) = opencode::poll_all_assistant_messages(git_stdout, compact) {
                 eprintln!("daemon: opencode poll error: {err}");
             }
+            std::thread::sleep(std::time::Duration::from_secs(interval_secs));
         }
-        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
     });
 }
 
@@ -203,6 +193,38 @@ pub fn send_event(
     }
 }
 
+pub fn send_refresh_drafts(session_id: &str) -> Result<(), String> {
+    ensure_daemon_running()?;
+    let request = Request {
+        kind: "refresh_drafts".to_string(),
+        session_id: Some(session_id.to_string()),
+        summary: None,
+        paths: None,
+        tokens: None,
+        tool_tokens: None,
+        meta: None,
+        cwd: None,
+        git_stdout: None,
+    };
+    let socket = socket_path();
+    let mut stream = UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;
+    let payload = serde_json::to_vec(&request).map_err(|err| err.to_string())?;
+    stream.write_all(&payload).map_err(|err| err.to_string())?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|err| err.to_string())?;
+    let mut response_buf = String::new();
+    stream
+        .read_to_string(&mut response_buf)
+        .map_err(|err| err.to_string())?;
+    let response: Response = serde_json::from_str(&response_buf).map_err(|err| err.to_string())?;
+    if response.ok {
+        Ok(())
+    } else {
+        Err(response.message)
+    }
+}
+
 fn handle_stream(mut stream: UnixStream) -> Result<bool, String> {
     let mut buffer = String::new();
     stream
@@ -215,6 +237,7 @@ fn handle_stream(mut stream: UnixStream) -> Result<bool, String> {
     let should_continue = request.kind.as_str() != "stop";
     let response = match request.kind.as_str() {
         "event" => handle_event(&request),
+        "refresh_drafts" => handle_refresh_drafts(&request),
         "ping" | "end_all" => Ok(EventResult {
             message: "ok".to_string(),
             summary: None,
@@ -349,6 +372,93 @@ pub fn upsert_session_presence(
     )
 }
 
+fn handle_refresh_drafts(request: &Request) -> Result<EventResult, String> {
+    let session_id = request.session_id.as_ref().ok_or("missing session_id")?;
+    daemon_log::log(&format!("daemon: refresh_drafts session_id={}", session_id));
+    refresh_session_drafts(session_id)?;
+    Ok(EventResult {
+        message: "ok".to_string(),
+        summary: None,
+        staged_paths: Vec::new(),
+    })
+}
+
+pub fn refresh_session_drafts(session_id: &str) -> Result<(), String> {
+    llm::block_on_async(refresh_session_drafts_async(session_id))
+}
+
+async fn refresh_session_drafts_async(session_id: &str) -> Result<(), String> {
+    let drafts = store::list_drafts(session_id)?;
+    daemon_log::log(&format!("daemon: refresh_session_drafts {} drafts (parallel)", drafts.len()));
+    let handles: Vec<_> = drafts
+        .into_iter()
+        .map(|draft| {
+            let draft_id = draft.id;
+            tokio::task::spawn(async move { refresh_draft_message_async(&draft_id).await })
+        })
+        .collect();
+    for handle in handles {
+        let _ = handle.await;
+    }
+    Ok(())
+}
+
+async fn refresh_draft_message_async(draft_id: &str) -> Result<(), String> {
+    let turns = store::list_turns_for_draft(draft_id)?;
+    let change_ids = store::draft_change_ids(draft_id)?;
+    let mut changes = Vec::new();
+    for change_id in change_ids {
+        if let Some(change) = store::get_change(&change_id)? {
+            changes.push(change);
+        }
+    }
+
+    daemon_log::log(&format!(
+        "daemon: commit inference start draft_id={} turns={} changes={}",
+        draft_id,
+        turns.len(),
+        changes.len()
+    ));
+
+    let mut last_err = String::new();
+    for (i, &delay_secs) in std::iter::once(&0u64).chain(RETRY_DELAYS_SECS.iter()).enumerate() {
+        if i > 0 {
+            daemon_log::log(&format!(
+                "daemon: commit inference attempt {} failed ({}); will retry in {} seconds",
+                i,
+                last_err,
+                delay_secs
+            ));
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+        }
+
+        match llm::infer_commit_message_async(&turns, &changes).await {
+            Ok(msg) if grouping::is_valid_commit_subject(&msg.subject) => {
+                daemon_log::log(&format!("daemon: commit inference ok subject={:?}", msg.subject));
+                let full_message = grouping::build_full_message(&msg.subject, &msg.body);
+                return store::update_draft_message(draft_id, &full_message);
+            }
+            Ok(msg) => {
+                last_err = format!("Invalid commit subject: {:?}", msg.subject);
+                daemon_log::log(&format!("daemon: commit inference subject rejected: {}", last_err));
+            }
+            Err(e) => {
+                last_err = e.clone();
+                daemon_log::log(&format!("daemon: commit inference error: {}", last_err));
+            }
+        }
+    }
+
+    daemon_log::log(&format!(
+        "daemon: commit inference failed after all retries: {}",
+        last_err
+    ));
+    Err(format!(
+        "Commit message inference failed after retries: {}",
+        last_err
+    ))
+}
+
 pub fn approve_drafts(
     session_id: &str,
     draft_ids: Option<Vec<String>>,
@@ -380,7 +490,8 @@ pub fn approve_drafts(
         }
         let file_list = files.into_iter().collect::<Vec<_>>();
         git::add_files_in_root(&session.repo_path, &file_list)?;
-        let commit = git::commit_message_in_root(&session.repo_path, &draft.message)?;
+        let msg = format!("{}\n\n@gg", draft.message);
+        let commit = git::commit_message_in_root(&session.repo_path, &msg)?;
         store::update_draft_status(&draft.id, crate::session::DraftStatus::Approved)?;
         commits.push(commit);
     }
@@ -414,13 +525,26 @@ fn write_session_ref(session_id: &str) -> Result<(), String> {
 
 pub fn ensure_daemon_running() -> Result<(), String> {
     let socket = socket_path();
-    if UnixStream::connect(&socket).is_ok() {
-        return Ok(());
+    for _ in 0..5 {
+        if UnixStream::connect(&socket).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    try_kill_unresponsive_daemon();
+    if Path::new(&socket).exists() {
+        let _ = fs::remove_file(&socket);
     }
     let exe = env::current_exe().map_err(|err| err.to_string())?;
-    Command::new(exe)
-        .env("GG_DAEMON", "1")
-        .spawn()
+    let logs = env::var("GG_DAEMON_LOGS").ok().as_deref() == Some("1");
+    let mut cmd = Command::new(exe);
+    cmd.env("GG_DAEMON", "1");
+    if logs {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    cmd.spawn()
         .map_err(|err| err.to_string())?;
     for _ in 0..20 {
         if UnixStream::connect(&socket).is_ok() {
@@ -432,29 +556,112 @@ pub fn ensure_daemon_running() -> Result<(), String> {
 }
 
 pub fn stop_daemon() -> Result<(), String> {
-    let socket = socket_path();
-    let mut stream = UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;
-    let request = Request {
-        kind: "stop".to_string(),
-        session_id: None,
-        summary: None,
-        paths: None,
-        tokens: None,
-        tool_tokens: None,
-        meta: None,
-        cwd: None,
-        git_stdout: None,
-    };
-    let payload = serde_json::to_vec(&request).map_err(|err| err.to_string())?;
-    stream.write_all(&payload).map_err(|err| err.to_string())?;
-    stream
-        .shutdown(std::net::Shutdown::Write)
-        .map_err(|err| err.to_string())?;
+    #[cfg(unix)]
+    {
+        kill_daemon_by_pid()
+    }
+    #[cfg(not(unix))]
+    {
+        Err("stop not supported on this platform".to_string())
+    }
+}
+
+#[cfg(unix)]
+fn kill_daemon_by_pid() -> Result<(), String> {
+    let pid_path = pid_file_path();
+    let contents = fs::read_to_string(&pid_path).map_err(|err| format!("daemon not running: {err}"))?;
+    let contents = contents.trim();
+    if contents.is_empty() {
+        return Err("daemon not running".to_string());
+    }
+    let pid: i32 = contents
+        .parse()
+        .map_err(|_| "invalid pid file".to_string())?;
+    if pid <= 0 {
+        let _ = fs::remove_file(&pid_path);
+        return Err("daemon not running".to_string());
+    }
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        let _ = fs::remove_file(&pid_path);
+        return Err("daemon not running".to_string());
+    }
+    let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            let _ = fs::remove_file(&pid_path);
+            return Ok(());
+        }
+    }
+    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    let _ = fs::remove_file(&pid_path);
     Ok(())
 }
 
 fn socket_path() -> String {
     env::var("GG_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string())
+}
+
+fn pid_file_path() -> PathBuf {
+    if let Ok(path) = env::var("GG_PID_FILE") {
+        return PathBuf::from(path);
+    }
+    let socket = socket_path();
+    let pid_path = socket
+        .strip_suffix(".sock")
+        .map(|s| format!("{s}.pid"))
+        .unwrap_or_else(|| format!("{socket}.pid"));
+    PathBuf::from(pid_path)
+}
+
+#[cfg(unix)]
+fn try_kill_unresponsive_daemon() {
+    let pid_path = pid_file_path();
+    let contents = match fs::read_to_string(&pid_path) {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => return,
+    };
+    let pid: i32 = match contents.trim().parse() {
+        Ok(p) if p > 0 => p,
+        _ => {
+            let _ = fs::remove_file(&pid_path);
+            return;
+        }
+    };
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    if !alive {
+        let _ = fs::remove_file(&pid_path);
+        return;
+    }
+    let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            let _ = fs::remove_file(&pid_path);
+            return;
+        }
+    }
+    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    let _ = fs::remove_file(&pid_path);
+}
+
+#[cfg(not(unix))]
+fn try_kill_unresponsive_daemon() {}
+
+struct PidFileGuard {
+    path: PathBuf,
+}
+
+impl PidFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for PidFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn parse_bool_env(key: &str) -> Option<bool> {
@@ -578,7 +785,7 @@ fn capture_changes_for_turn(
 
 fn assign_changes_to_draft(
     session_id: &str,
-    prompt: &str,
+    _prompt: &str,
     changes: &[Change],
 ) -> Result<(), String> {
     let lockfiles = [
@@ -604,35 +811,44 @@ fn assign_changes_to_draft(
         }
     }
     if !normal.is_empty() {
-        let message = grouping::infer_message(prompt, &normal);
-        let draft_id = ensure_draft(session_id, &message, false)?;
+        let files: String = normal
+            .iter()
+            .map(|c| c.file_path.as_str())
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let subject = format!("fix: (generating...): {files}");
+        let draft_id = ensure_draft(session_id, &subject, false)?;
         for change in normal {
             store::add_change_to_draft(&draft_id, &change.id)?;
         }
+        llm::block_on_async(refresh_draft_message_async(&draft_id))?;
     }
     if !lock.is_empty() {
-        let message = "chore: update lockfiles".to_string();
-        let draft_id = ensure_draft(session_id, &message, true)?;
+        let subject = "chore: update lockfiles".to_string();
+        let draft_id = ensure_draft(session_id, &subject, true)?;
         for change in lock {
             store::add_change_to_draft(&draft_id, &change.id)?;
         }
+        llm::block_on_async(refresh_draft_message_async(&draft_id))?;
     }
     Ok(())
 }
 
-fn ensure_draft(session_id: &str, message: &str, auto_approved: bool) -> Result<String, String> {
+const RETRY_DELAYS_SECS: &[u64] = &[20, 40, 60, 80, 100];
+
+fn ensure_draft(session_id: &str, subject: &str, auto_approved: bool) -> Result<String, String> {
     let drafts = store::list_drafts(session_id)?;
-    if let Some(existing) = drafts
-        .into_iter()
-        .find(|item| item.message.eq_ignore_ascii_case(message))
-    {
+    if let Some(existing) = drafts.into_iter().find(|item| {
+        grouping::subject_line(&item.message).eq_ignore_ascii_case(subject)
+    }) {
         return Ok(existing.id);
     }
     let id = stable_id(&format!(
-        "{session_id}:{message}:{}",
+        "{session_id}:{subject}:{}",
         OffsetDateTime::now_utc().unix_timestamp()
     ));
-    store::create_draft(&id, session_id, message, auto_approved)?;
+    store::create_draft(&id, session_id, subject, auto_approved)?;
     Ok(id)
 }
 

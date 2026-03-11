@@ -749,7 +749,7 @@ fn render(
             scroll_offset,
         } => {
             let diff_chunks = Layout::vertical([
-                Constraint::Length(2),
+                Constraint::Min(3),
                 Constraint::Min(0),
                 Constraint::Length(1),
             ])
@@ -758,9 +758,14 @@ fn render(
             if let Some(session) = sessions.get(*session_idx) {
                 let drafts = store::list_drafts(&session.id).unwrap_or_default();
                 if let Some(draft) = drafts.get(*draft_idx) {
+                    let msg_area = Layout::horizontal([
+                        Constraint::Percentage(65),
+                        Constraint::Min(0),
+                    ])
+                    .split(diff_chunks[0]);
                     let msg_para =
                         Paragraph::new(draft.message.as_str()).wrap(Wrap { trim: false });
-                    frame.render_widget(msg_para, diff_chunks[0]);
+                    frame.render_widget(msg_para, msg_area[0]);
                     let change_ids = store::draft_change_ids(&draft.id).unwrap_or_default();
                     let changes: Vec<_> = change_ids
                         .iter()

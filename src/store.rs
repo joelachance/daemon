@@ -412,6 +412,14 @@ pub fn list_drafts(session_id: &str) -> Result<Vec<DraftCommit>, String> {
     })
 }
 
+pub fn delete_drafts_for_session(session_id: &str) -> Result<(), String> {
+    with_conn(|conn| {
+        conn.execute("DELETE FROM drafts WHERE session_id = ?1", params![session_id])
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    })
+}
+
 pub fn draft_change_ids(draft_id: &str) -> Result<Vec<String>, String> {
     with_conn(|conn| {
         let mut stmt = conn
@@ -808,4 +816,12 @@ pub fn get_ollama_model() -> Result<Option<String>, String> {
 
 pub fn set_ollama_model(model: &str) -> Result<(), String> {
     with_conn(|conn| set_config(conn, "ollama_model", model))
+}
+
+pub fn get_embedded_model() -> Result<Option<String>, String> {
+    with_conn(|conn| get_config(conn, "embedded_model"))
+}
+
+pub fn set_embedded_model(model_id: &str) -> Result<(), String> {
+    with_conn(|conn| set_config(conn, "embedded_model", model_id))
 }

@@ -30,7 +30,7 @@ fn main() {
             if env::var("GG_DAEMON").ok().as_deref() == Some("1") {
                 daemon_log::init();
                 #[cfg(feature = "llama-embedded")]
-                daemon_log::log(&format!("daemon: embedded model when unset: {}", model::DEFAULT_FILE));
+                daemon_log::log(&format!("daemon: embedded model default: {}", model::DEFAULT_EMBEDDED_MODEL));
                 #[cfg(not(feature = "llama-embedded"))]
                 daemon_log::log("daemon: llm provider order: OpenAI > Anthropic > Ollama (default)");
                 let _ = std::thread::spawn(|| {

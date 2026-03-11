@@ -5,8 +5,8 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-pub const DEFAULT_REPO: &str = "bartowski/SmolLM2-360M-Instruct-GGUF";
-pub const DEFAULT_FILE: &str = "SmolLM2-360M-Instruct-Q4_K_M.gguf";
+pub const DEFAULT_REPO: &str = "bartowski/SmolLM2-1.7B-Instruct-GGUF";
+pub const DEFAULT_FILE: &str = "SmolLM2-1.7B-Instruct-Q4_K_M.gguf";
 
 static CACHED_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -96,12 +96,12 @@ fn find_cached_default_model() -> Option<PathBuf> {
         .ok()
         .map(PathBuf::from)
         .or_else(|| env::var("HOME").ok().map(|h| PathBuf::from(h).join(".cache").join("huggingface")))?;
-    let refs_path = hub.join("hub").join("models--bartowski--SmolLM2-360M-Instruct-GGUF").join("refs").join("main");
+    let refs_path = hub.join("hub").join("models--bartowski--SmolLM2-1.7B-Instruct-GGUF").join("refs").join("main");
     let commit = std::fs::read_to_string(&refs_path).ok()?;
     let commit = commit.trim();
     let path = hub
         .join("hub")
-        .join("models--bartowski--SmolLM2-360M-Instruct-GGUF")
+        .join("models--bartowski--SmolLM2-1.7B-Instruct-GGUF")
         .join("snapshots")
         .join(commit)
         .join(DEFAULT_FILE);

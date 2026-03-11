@@ -152,6 +152,7 @@ pub fn poll_completed_sessions(
             .map(|value| value >= cutoff)
             .unwrap_or(false)
     });
+    sessions.retain(|s| !s.is_archived.unwrap_or(false));
     if env::var("GG_DEBUG_CURSOR_ROOTS").ok().as_deref() == Some("1") {
         eprintln!(
             "cursor poll root={} sessions={} workspace_candidates={} fallback_used={} scanned={} rejected={} hydrated_found={} hydrated_missing={}",

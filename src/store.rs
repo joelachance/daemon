@@ -349,6 +349,20 @@ pub fn create_draft(
     })
 }
 
+/// Returns true if the change is already assigned to any draft.
+pub fn change_already_assigned(change_id: &str) -> Result<bool, String> {
+    with_conn(|conn| {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM draft_changes WHERE change_id = ?1",
+                params![change_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(count > 0)
+    })
+}
+
 pub fn add_change_to_draft(draft_id: &str, change_id: &str) -> Result<(), String> {
     with_conn(|conn| {
         let order = next_draft_change_order_with_conn(conn, draft_id)?;

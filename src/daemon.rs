@@ -811,8 +811,13 @@ fn assign_changes_to_draft(
             normal.push(change.clone());
         }
     }
-    if !normal.is_empty() {
-        let files: String = normal
+    let normal_unassigned: Vec<_> = normal
+        .iter()
+        .filter(|c| !store::change_already_assigned(&c.id).unwrap_or(false))
+        .cloned()
+        .collect();
+    if !normal_unassigned.is_empty() {
+        let files: String = normal_unassigned
             .iter()
             .map(|c| c.file_path.as_str())
             .take(3)
@@ -820,15 +825,20 @@ fn assign_changes_to_draft(
             .join(", ");
         let subject = format!("fix: (generating...): {files}");
         let draft_id = ensure_draft(session_id, &subject, false)?;
-        for change in normal {
+        for change in normal_unassigned {
             store::add_change_to_draft(&draft_id, &change.id)?;
         }
         llm::block_on_async(refresh_draft_message_async(&draft_id))?;
     }
-    if !lock.is_empty() {
+    let lock_unassigned: Vec<_> = lock
+        .iter()
+        .filter(|c| !store::change_already_assigned(&c.id).unwrap_or(false))
+        .cloned()
+        .collect();
+    if !lock_unassigned.is_empty() {
         let subject = "chore: update lockfiles".to_string();
         let draft_id = ensure_draft(session_id, &subject, true)?;
-        for change in lock {
+        for change in lock_unassigned {
             store::add_change_to_draft(&draft_id, &change.id)?;
         }
         llm::block_on_async(refresh_draft_message_async(&draft_id))?;

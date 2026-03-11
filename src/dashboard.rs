@@ -4,6 +4,8 @@ use crate::git;
 use crate::grouping;
 use crate::llm;
 use crate::path;
+#[cfg(feature = "llama-embedded")]
+use crate::model;
 use crate::session_row;
 use crate::store;
 use crossterm::event::{poll, read, Event, KeyCode, KeyEventKind};
@@ -69,6 +71,8 @@ struct SlashMenuState {
     level: usize,
     items: Vec<String>,
     selected: usize,
+    /// When level 2: "ollama" or "llama" to know which submenu we're in
+    context: Option<String>,
 }
 
 pub fn run_dashboard() -> Result<(), String> {
@@ -114,7 +118,8 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
     let mut view = View::Sessions { selected: 0 };
     let mut accept_pending = false;
     let mut status: Option<(bool, String)> = None;
-    let mut refresh_rx: Option<mpsc::Receiver<()>> = None;
+    let mut refresh_rx: Option<mpsc::Receiver<Result<(), String>>> = None;
+    let mut model_download_rx: Option<mpsc::Receiver<(bool, String)>> = None;
     let mut spinner_frame: usize = 0;
     let mut log_scroll: u16 = 0;
     let mut slash_menu: Option<SlashMenuState> = None;
@@ -142,9 +147,18 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
             last_refresh_mtime = store::refresh_signal_mtime();
         }
 
+        if let Some(ref rx) = model_download_rx {
+            if let Ok((ok, msg)) = rx.try_recv() {
+                model_download_rx = None;
+                status = Some((ok, msg));
+            }
+        }
         if let Some(ref rx) = refresh_rx {
-            if rx.try_recv().is_ok() {
+            if let Ok(result) = rx.try_recv() {
                 refresh_rx = None;
+                if let Err(e) = result {
+                    status = Some((false, format!("Refresh failed: {e}")));
+                }
             }
         }
         let refreshing = refresh_rx.is_some();
@@ -312,6 +326,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                 level: 0,
                 items: vec!["Models".to_string()],
                 selected: 0,
+                context: None,
             });
             continue;
         }
@@ -327,17 +342,27 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                             level: 0,
                             items: vec!["Models".to_string()],
                             selected: 0,
+                            context: None,
                         };
                         slash_menu = Some(menu);
                     } else {
                         menu = SlashMenuState {
                             level: 1,
+                            #[cfg(feature = "llama-embedded")]
+                            items: vec![
+                                "OpenAI".to_string(),
+                                "Anthropic".to_string(),
+                                "Llama".to_string(),
+                                "Ollama".to_string(),
+                            ],
+                            #[cfg(not(feature = "llama-embedded"))]
                             items: vec![
                                 "OpenAI".to_string(),
                                 "Anthropic".to_string(),
                                 "Ollama".to_string(),
                             ],
                             selected: 0,
+                            context: None,
                         };
                         slash_menu = Some(menu);
                     }
@@ -386,8 +411,13 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                             }
                             #[cfg(feature = "llama-embedded")]
                             "Llama" => {
-                                let _ = store::set_llm_provider("llama");
-                                close_with_status = Some((true, "Switched to Llama (embedded)".to_string()));
+                                let models = model::list_embedded_models();
+                                let items: Vec<String> = models.iter().map(|(_, d)| d.clone()).collect();
+                                menu.level = 2;
+                                menu.items = items;
+                                menu.selected = 0;
+                                menu.context = Some("llama".to_string());
+                                slash_menu = Some(menu);
                             }
                             "Ollama" => {
                                 match llm::list_ollama_models_blocking() {
@@ -395,6 +425,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                                         menu.level = 2;
                                         menu.items = models;
                                         menu.selected = 0;
+                                        menu.context = Some("ollama".to_string());
                                         slash_menu = Some(menu);
                                     }
                                     Ok(_) | Err(_) => {
@@ -409,6 +440,37 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                             _ => {
                                 slash_menu = Some(menu);
                             }
+                        }
+                    } else if menu.context.as_deref() == Some("llama") {
+                        #[cfg(feature = "llama-embedded")]
+                        {
+                            let models = model::list_embedded_models();
+                            let model_id = models
+                                .iter()
+                                .find(|(_, d)| d == &item)
+                                .map(|(id, _)| id.clone())
+                                .unwrap_or_else(|| item.to_lowercase().replace(' ', "-"));
+                            let display_name = item.clone();
+                            let _ = store::set_embedded_model(&model_id);
+                            let _ = store::set_llm_provider("llama");
+                            model::clear_model_cache();
+                            let (tx, rx) = mpsc::channel();
+                            model_download_rx = Some(rx);
+                            std::thread::spawn(move || {
+                                match model::model_path_for(&model_id) {
+                                    Ok(_) => {
+                                        let _ = tx.send((true, format!("Model ready: {}", display_name)));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send((false, format!("Model download failed: {}", e)));
+                                    }
+                                }
+                            });
+                            close_with_status = Some((true, format!("Switched to Llama ({})", item)));
+                        }
+                        #[cfg(not(feature = "llama-embedded"))]
+                        {
+                            slash_menu = Some(menu);
                         }
                     } else {
                         let _ = store::set_ollama_model(&item);
@@ -485,8 +547,18 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                 continue;
             }
             KeyCode::Char('r') => {
-                // Manual refresh: clear pending refresh so we show current store state
-                refresh_rx = None;
+                if let View::Commits { session_idx, .. } = &view {
+                    if *session_idx < sessions.len() {
+                        refresh_rx = None; // Cancel any in-flight refresh
+                        let session_id = sessions[*session_idx].id.clone();
+                        let (tx, rx) = mpsc::channel();
+                        std::thread::spawn(move || {
+                            let result = daemon::send_refresh_drafts(&session_id);
+                            let _ = tx.send(result);
+                        });
+                        refresh_rx = Some(rx);
+                    }
+                }
                 continue;
             }
             _ => continue,
@@ -590,8 +662,8 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                     let session_id = sessions[*selected].id.clone();
                     let (tx, rx) = mpsc::channel();
                     std::thread::spawn(move || {
-                        let _ = daemon::send_refresh_drafts(&session_id);
-                        let _ = tx.send(());
+                        let result = daemon::send_refresh_drafts(&session_id);
+                        let _ = tx.send(result);
                     });
                     refresh_rx = Some(rx);
                     let drafts = store::list_drafts(&sessions[*selected].id)?;
@@ -674,7 +746,7 @@ fn render(
             Line::from(Span::styled("vibe dashboard", theme::header_title())),
             Line::from(vec![
                 Span::styled(
-                    format!(" {} Refreshing commit messages... (r=show store)", spin),
+                    format!(" {} Refreshing commit messages... (r=restart)", spin),
                     theme::header_hint(),
                 ),
             ]),

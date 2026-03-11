@@ -817,18 +817,39 @@ fn assign_changes_to_draft(
         .cloned()
         .collect();
     if !normal_unassigned.is_empty() {
-        let files: String = normal_unassigned
-            .iter()
-            .map(|c| c.file_path.as_str())
-            .take(3)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let subject = format!("fix: (generating...): {files}");
-        let draft_id = ensure_draft(session_id, &subject, false)?;
-        for change in normal_unassigned {
-            store::add_change_to_draft(&draft_id, &change.id)?;
+        let groups = llm::block_on_async(llm::infer_grouping_async(&normal_unassigned));
+        match groups {
+            Ok(groups) if !groups.is_empty() => {
+                for (subject, indices) in groups {
+                    let changes_in_group: Vec<_> = indices
+                        .into_iter()
+                        .filter_map(|i| normal_unassigned.get(i).cloned())
+                        .collect();
+                    if changes_in_group.is_empty() {
+                        continue;
+                    }
+                    let draft_id = ensure_draft(session_id, &subject, false)?;
+                    for change in changes_in_group {
+                        store::add_change_to_draft(&draft_id, &change.id)?;
+                    }
+                    llm::block_on_async(refresh_draft_message_async(&draft_id))?;
+                }
+            }
+            _ => {
+                let files: String = normal_unassigned
+                    .iter()
+                    .map(|c| c.file_path.as_str())
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let subject = format!("fix: (generating...): {files}");
+                let draft_id = ensure_draft(session_id, &subject, false)?;
+                for change in normal_unassigned {
+                    store::add_change_to_draft(&draft_id, &change.id)?;
+                }
+                llm::block_on_async(refresh_draft_message_async(&draft_id))?;
+            }
         }
-        llm::block_on_async(refresh_draft_message_async(&draft_id))?;
     }
     let lock_unassigned: Vec<_> = lock
         .iter()

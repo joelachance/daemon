@@ -720,6 +720,253 @@ pub async fn infer_commit_message_async(
     }
 }
 
+/// Groups changes into logical commits. Returns Vec of (subject_placeholder, Vec<change_indices>).
+pub async fn infer_grouping_async(changes: &[Change]) -> Result<Vec<(String, Vec<usize>)>, String> {
+    if changes.is_empty() {
+        return Ok(Vec::new());
+    }
+    if changes.len() == 1 {
+        return Ok(vec![("fix: (generating...)".to_string(), vec![0])]);
+    }
+
+    let provider = select_provider().ok_or_else(|| {
+        daemon_log::log("daemon: llm grouping: no provider available");
+        "No LLM provider available for grouping.".to_string()
+    })?;
+
+    daemon_log::log(&format!("daemon: llm grouping: {} changes, provider={:?}", changes.len(), provider));
+
+    match provider {
+        Provider::OpenAI => infer_grouping_openai(changes).await,
+        Provider::Anthropic => infer_grouping_anthropic(changes).await,
+        Provider::Ollama => infer_grouping_ollama(changes).await,
+        #[cfg(feature = "llama-embedded")]
+        Provider::Llama => {
+            let changes = changes.to_vec();
+            tokio::task::spawn_blocking(move || infer_grouping_llama_blocking(&changes))
+                .await
+                .map_err(|e| format!("llama grouping task join: {e}"))?
+        }
+        Provider::Bedrock => Err("Grouping not supported for Bedrock provider.".to_string()),
+    }
+}
+
+const GROUPING_SYSTEM_PROMPT: &str = "You are a git commit assistant. Given a list of code changes (each with an index 0, 1, 2...), group them into logical commits. Output ONLY a JSON array. Each element: {\"subject\": \"type: short description\", \"indices\": [0, 2, 5]}. Use conventional commit types (fix, feat, chore, refactor, etc). Each index must appear exactly once. Subject max 72 chars.";
+
+fn build_grouping_prompt(changes: &[Change], max_bytes: usize) -> String {
+    let mut out = String::new();
+    out.push_str("Code changes to group (index : file : diff):\n---\n");
+    let mut total_bytes = 0;
+    for (i, change) in changes.iter().enumerate() {
+        if total_bytes >= max_bytes {
+            break;
+        }
+        out.push_str(&format!("[{}] File: {}\n", i, change.file_path));
+        let remaining = max_bytes - total_bytes;
+        if change.diff.len() <= remaining {
+            out.push_str(&change.diff);
+            total_bytes += change.diff.len();
+        } else {
+            let end = remaining.min(change.diff.len());
+            out.push_str(&change.diff[..end]);
+            out.push_str("\n... (truncated)");
+            total_bytes = max_bytes;
+        }
+        out.push_str("\n---\n");
+    }
+    out.push_str("\nOutput ONLY a JSON array. Example: [{\"subject\":\"fix: add validation\",\"indices\":[0,2]},{\"subject\":\"feat: add endpoint\",\"indices\":[1]}]");
+    out
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GroupingItem {
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    indices: Vec<usize>,
+}
+
+fn parse_grouping_response(text: &str, n_changes: usize) -> Result<Vec<(String, Vec<usize>)>, String> {
+    let trimmed = text.trim();
+    let cleaned = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|s| s.strip_suffix("```"))
+        .unwrap_or(trimmed)
+        .trim();
+    let start = cleaned.find('[').ok_or_else(|| "llm: no JSON array in grouping response".to_string())?;
+    let end = cleaned.rfind(']').ok_or_else(|| "llm: no JSON array in grouping response".to_string())?;
+    if end <= start {
+        return Err("llm: invalid JSON array in grouping response".to_string());
+    }
+    let arr_str = &cleaned[start..=end];
+    let items: Vec<GroupingItem> = serde_json::from_str(arr_str)
+        .map_err(|e| format!("llm: parse grouping JSON: {}", e))?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        let subject = if item.subject.trim().is_empty() {
+            "fix: (generating...)".to_string()
+        } else {
+            item.subject.trim().to_string()
+        };
+        let mut indices: Vec<usize> = item
+            .indices
+            .into_iter()
+            .filter(|&i| i < n_changes && seen.insert(i))
+            .collect();
+        indices.sort();
+        if !indices.is_empty() {
+            out.push((subject, indices));
+        }
+    }
+    let assigned: usize = out.iter().map(|(_, idx)| idx.len()).sum();
+    if assigned < n_changes {
+        let missing: Vec<usize> = (0..n_changes).filter(|i| !seen.contains(i)).collect();
+        daemon_log::log(&format!("daemon: llm grouping: {} indices not assigned, adding as single group: {:?}", n_changes - assigned, missing));
+        out.push(("fix: (generating...)".to_string(), missing));
+    }
+    if out.is_empty() {
+        return Err("llm: grouping produced no groups".to_string());
+    }
+    Ok(out)
+}
+
+async fn infer_grouping_openai(changes: &[Change]) -> Result<Vec<(String, Vec<usize>)>, String> {
+    let api_key = env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?;
+    let model = env::var("GG_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+    let user_prompt = build_grouping_prompt(changes, MAX_DIFF_BYTES);
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": GROUPING_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        "max_tokens": 1000
+    });
+
+    let res = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("openai grouping: {}", e))?;
+
+    let text = res.text().await.map_err(|e| format!("openai grouping: {}", e))?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("openai grouping: {}", e))?;
+    let content = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| "openai grouping: missing content".to_string())?;
+
+    parse_grouping_response(content, changes.len())
+}
+
+async fn infer_grouping_anthropic(changes: &[Change]) -> Result<Vec<(String, Vec<usize>)>, String> {
+    let api_key = env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY not set")?;
+    let model = env::var("GG_ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-3-5-haiku-20241022".to_string());
+    let user_prompt = build_grouping_prompt(changes, MAX_DIFF_BYTES);
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 1000,
+        "messages": [
+            {"role": "user", "content": user_prompt}
+        ],
+        "system": GROUPING_SYSTEM_PROMPT
+    });
+
+    let res = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("anthropic grouping: {}", e))?;
+
+    let text = res.text().await.map_err(|e| format!("anthropic grouping: {}", e))?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("anthropic grouping: {}", e))?;
+    let content = json
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first())
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| "anthropic grouping: missing content".to_string())?;
+
+    parse_grouping_response(content, changes.len())
+}
+
+async fn infer_grouping_ollama(changes: &[Change]) -> Result<Vec<(String, Vec<usize>)>, String> {
+    let base = ollama_base_url();
+    let model = ollama_model();
+    let user_prompt = build_grouping_prompt(changes, MAX_DIFF_BYTES);
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "stream": false,
+        "messages": [
+            {"role": "system", "content": GROUPING_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ]
+    });
+
+    let url = format!("{}/api/chat", base.trim_end_matches('/'));
+    let res = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("ollama grouping: {}", e))?;
+
+    let text = res.text().await.map_err(|e| format!("ollama grouping: {}", e))?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("ollama grouping: {}", e))?;
+    let content = json
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| "ollama grouping: missing content".to_string())?;
+
+    parse_grouping_response(content, changes.len())
+}
+
+#[cfg(feature = "llama-embedded")]
+fn infer_grouping_llama_blocking(changes: &[Change]) -> Result<Vec<(String, Vec<usize>)>, String> {
+    daemon_log::log("daemon: llm infer_grouping_llama_blocking start...");
+    let model_path = model::default_model_path().ok();
+    let max_tokens = env::var("GG_LLAMA_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512);
+    let timeout_ms = env::var("GG_LLAMA_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30_000);
+
+    let user_prompt = build_grouping_prompt(changes, MAX_DIFF_BYTES_LLAMA);
+    let prompt = format!(
+        "<|im_start|>system\n{}\n<|im_end|>\n<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n",
+        GROUPING_SYSTEM_PROMPT,
+        user_prompt
+    );
+
+    daemon_log::log(&format!("daemon: llm grouping llama prompt_len={}...", prompt.len()));
+    let out = llama::run_completion(&prompt, max_tokens, timeout_ms, model_path.as_deref())?;
+    parse_grouping_response(out.trim(), changes.len())
+}
+
 /// Fetch list of installed Ollama models. Used by dashboard for model selection.
 pub fn list_ollama_models_blocking() -> Result<Vec<String>, String> {
     block_on_async(list_ollama_models_async())

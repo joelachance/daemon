@@ -43,6 +43,22 @@ where
 
 const COMMIT_SYSTEM_PROMPT: &str = "You are a git commit message assistant. Output ONLY a JSON object: {\"subject\": \"...\", \"body\": \"...\"}. Subject: conventional commit (type(scope): description), max 72 chars. Summarize the overall work done in this commit. Body: required. Describe the specific code changes and why they were made, in 1-3 sentences. Use the conversation context. Wrap at 72 chars. Do not use generic phrases like 'resolve null pointer' or 'fix bug'. The subject must describe what actually changed in the diff. Base both on the actual code diffs and conversation. Never quote the conversation.";
 
+/// Llama-specific system prompt. Avoids "..." placeholder which small models copy literally.
+const COMMIT_SYSTEM_PROMPT_LLAMA: &str = "You are a git commit message assistant. Output ONLY valid JSON. Subject: conventional commit (type(scope): description), max 72 chars. Body: 1-3 sentences describing the code changes. Base on the actual diffs and conversation. Never quote the conversation.";
+
+/// True if body is a known placeholder that small models copy from prompts.
+fn is_placeholder_body(body: &str) -> bool {
+    let b = body.trim().to_lowercase();
+    b.is_empty()
+        || b == "your description here"
+        || b == "added validation for user input."
+        || b == "describe the code changes"
+        || b == "describe the changes"
+        || b == "describe the changes. no other text."
+        || b.starts_with("1-3 sentences describing the code changes")
+        || b.starts_with("describe the code changes.")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CommitMessage {
     #[serde(default)]
@@ -100,6 +116,100 @@ fn build_commit_prompt(
         out.push_str("\n---\n");
     }
     out.push_str("\nOutput ONLY a JSON object: {\"subject\": \"...\", \"body\": \"...\"}");
+    out
+}
+
+/// Build prompt for Llama subject-only call (first of two).
+fn build_llama_subject_prompt(turns: &[(String, String)], changes: &[Change]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "IMPORTANT: Respond with ONLY a JSON object: {\"subject\": \"fix: add validation\"}. Use a real conventional commit for the actual changes. No other text.\n\n",
+    );
+    out.push_str("Conversation:\n---\n");
+    for (prompt, response) in turns {
+        let p = prompt.trim();
+        let r = response.trim();
+        if !p.is_empty() {
+            out.push_str("User: ");
+            out.push_str(p);
+            out.push_str("\n---\n");
+        }
+        if !r.is_empty() {
+            out.push_str("Assistant: ");
+            out.push_str(r);
+            out.push_str("\n---\n");
+        }
+    }
+    out.push_str("\nCode changes (diffs):\n---\n");
+    let mut total_bytes = 0;
+    for change in changes {
+        if total_bytes >= MAX_DIFF_BYTES_LLAMA {
+            break;
+        }
+        out.push_str("File: ");
+        out.push_str(&change.file_path);
+        out.push_str("\n");
+        let remaining = MAX_DIFF_BYTES_LLAMA - total_bytes;
+        if change.diff.len() <= remaining {
+            out.push_str(&change.diff);
+            total_bytes += change.diff.len();
+        } else {
+            let end = remaining.min(change.diff.len());
+            out.push_str(&change.diff[..end]);
+            out.push_str("\n... (truncated)");
+            total_bytes = MAX_DIFF_BYTES_LLAMA;
+        }
+        out.push_str("\n---\n");
+    }
+    out.push_str("\nOutput ONLY a JSON object with key \"subject\". Example: {\"subject\": \"fix: add validation\"}. Use conventional commit format (type(scope): description), max 72 chars.");
+    out
+}
+
+/// Build prompt for Llama body-only call (second of two).
+fn build_llama_body_prompt(
+    turns: &[(String, String)],
+    changes: &[Change],
+    subject: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Subject: {}\n\n", subject));
+    out.push_str("Conversation:\n---\n");
+    for (prompt, response) in turns {
+        let p = prompt.trim();
+        let r = response.trim();
+        if !p.is_empty() {
+            out.push_str("User: ");
+            out.push_str(p);
+            out.push_str("\n---\n");
+        }
+        if !r.is_empty() {
+            out.push_str("Assistant: ");
+            out.push_str(r);
+            out.push_str("\n---\n");
+        }
+    }
+    out.push_str("\nCode changes (diffs):\n---\n");
+    let mut total_bytes = 0;
+    for change in changes {
+        if total_bytes >= MAX_DIFF_BYTES_LLAMA {
+            break;
+        }
+        out.push_str("File: ");
+        out.push_str(&change.file_path);
+        out.push_str("\n");
+        let remaining = MAX_DIFF_BYTES_LLAMA - total_bytes;
+        if change.diff.len() <= remaining {
+            out.push_str(&change.diff);
+            total_bytes += change.diff.len();
+        } else {
+            let end = remaining.min(change.diff.len());
+            out.push_str(&change.diff[..end]);
+            out.push_str("\n... (truncated)");
+            total_bytes = MAX_DIFF_BYTES_LLAMA;
+        }
+        out.push_str("\n---\n");
+    }
+    out.push_str("\nBody (1-3 sentences): ");
     out
 }
 
@@ -467,36 +577,76 @@ async fn infer_ollama(turns: &[(String, String)], changes: &[Change]) -> Result<
 
 #[cfg(feature = "llama-embedded")]
 fn infer_llama_blocking(turns: &[(String, String)], changes: &[Change]) -> Result<CommitMessage, String> {
-    daemon_log::log(&format!("daemon: llm infer_llama_blocking start (resolving model path)..."));
+    daemon_log::log("daemon: llm infer_llama_blocking start (two-call: subject, then body)...");
     let model_path = model::default_model_path().ok();
-    let user_prompt = build_commit_prompt(turns, changes, MAX_DIFF_BYTES_LLAMA, true);
-    // Prefix primes small models (e.g. SmolLM2-360M) to output JSON instead of prose
-    let prompt = format!(
-        "<|im_start|>system\n{}\n<|im_end|>\n<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n{{\"subject\":",
-        COMMIT_SYSTEM_PROMPT,
-        user_prompt
-    );
     let max_tokens = env::var("GG_LLAMA_MAX_TOKENS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(256);
+        .unwrap_or(512);
     let timeout_ms = env::var("GG_LLAMA_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30_000);
-    daemon_log::log(&format!("daemon: llm calling llama::run_completion (prompt_len={})...", prompt.len()));
-    let out = llama::run_completion(
-        &prompt,
-        max_tokens,
-        timeout_ms,
-        model_path.as_deref(),
-    )?;
-    daemon_log::log(&format!("daemon: llm llama returned, parsing (out_len={})...", out.len()));
-    // Model completes from {"subject": so output is "value","body":"value"}
-    let to_parse = format!("{{\"subject\":{}", out.trim());
-    let msg = parse_commit_message(&to_parse)?;
-    daemon_log::log(&format!("daemon: llm parse ok subject={:?}", msg.subject));
-    Ok(msg)
+
+    // Call 1: subject only
+    let subject_prompt = build_llama_subject_prompt(turns, changes);
+    let prompt1 = format!(
+        "<|im_start|>system\n{}\n<|im_end|>\n<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n{{\"subject\":\"",
+        COMMIT_SYSTEM_PROMPT_LLAMA,
+        subject_prompt
+    );
+    daemon_log::log(&format!("daemon: llm llama call 1 (subject) prompt_len={}...", prompt1.len()));
+    let out1 = llama::run_completion(&prompt1, max_tokens, timeout_ms, model_path.as_deref())?;
+    let value1 = out1.trim().strip_suffix("\"}").unwrap_or(out1.trim()).trim_matches('"');
+    let to_parse1 = format!(
+        "{{\"subject\":\"{}\"}}",
+        value1.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    );
+    let mut subject = extract_json_string_value(&to_parse1, "subject")
+        .or_else(|| extract_subject_body_fallback(&to_parse1).map(|m| m.subject))
+        .unwrap_or_else(|| value1.to_string());
+    // Model may output both subject and body in one go; take only the subject part
+    if let Some(pos) = subject.find("\",\"body\"") {
+        subject = subject[..pos].to_string();
+    }
+    let subject = subject.trim().to_string();
+    daemon_log::log(&format!("daemon: llm llama subject={:?}", subject));
+
+    if subject.is_empty() {
+        return Err("llm: could not extract subject from llama output".to_string());
+    }
+
+    // Call 2: body only (given subject)
+    let body_prompt = build_llama_body_prompt(turns, changes, &subject);
+    let prompt2 = format!(
+        "<|im_start|>system\n{}\n<|im_end|>\n<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n{{\"body\":\"",
+        COMMIT_SYSTEM_PROMPT_LLAMA,
+        body_prompt
+    );
+    daemon_log::log(&format!("daemon: llm llama call 2 (body) prompt_len={}...", prompt2.len()));
+    let out2 = llama::run_completion(&prompt2, max_tokens, timeout_ms, model_path.as_deref())?;
+    let value2 = out2.trim().strip_suffix("\"}").unwrap_or(out2.trim()).trim_matches('"');
+    let to_parse2 = format!(
+        "{{\"body\":\"{}\"}}",
+        value2.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    );
+    let mut body = extract_json_string_value(&to_parse2, "body")
+        .unwrap_or_else(|| value2.to_string());
+    // Model may append extra JSON; take only the first value
+    if let Some(pos) = body.find("\",\"") {
+        body = body[..pos].to_string();
+    }
+    let body = body.trim().to_string();
+    // Small models often copy prompt placeholders; treat as empty
+    let body = if is_placeholder_body(&body) {
+        daemon_log::log("daemon: llm body is placeholder, using empty (try GG_LLAMA_MODEL with larger model for descriptions)");
+        String::new()
+    } else {
+        body
+    };
+    daemon_log::log(&format!("daemon: llm llama body len={}", body.len()));
+
+    Ok(CommitMessage { subject, body })
 }
 
 fn infer_bedrock_blocking(turns: &[(String, String)], changes: &[Change]) -> Result<CommitMessage, String> {

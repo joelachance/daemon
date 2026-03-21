@@ -8,6 +8,7 @@ mod daemon;
 mod path;
 #[macro_use]
 mod daemon_log;
+mod debug_instrument;
 mod dashboard;
 mod git;
 mod grouping;

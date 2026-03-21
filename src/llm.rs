@@ -41,10 +41,10 @@ where
     guard.as_ref().unwrap().block_on(f)
 }
 
-const COMMIT_SYSTEM_PROMPT: &str = "You are a git commit message assistant. Output ONLY a JSON object: {\"subject\": \"...\", \"body\": \"...\"}. Subject: conventional commit (type(scope): description), max 72 chars. Summarize the overall work done in this commit. Body: required. Describe the specific code changes and why they were made, in 1-3 sentences. Use the conversation context. Wrap at 72 chars. Do not use generic phrases like 'resolve null pointer' or 'fix bug'. The subject must describe what actually changed in the diff. Base both on the actual code diffs and conversation. Never quote the conversation.";
+const COMMIT_SYSTEM_PROMPT: &str = "You are a git commit message assistant. Output ONLY a JSON object: {\"subject\": \"...\", \"body\": \"...\"}. Subject: short, clear summary of what changed, max 72 chars. Do NOT use type(scope): prefix in the subject. Body: required. First line of body must be conventional commit (type(scope): description). Then 1-3 sentences describing the specific code changes and why. Use the conversation context. Wrap at 72 chars. Do not use generic phrases like 'resolve null pointer' or 'fix bug'. Base both on the actual code diffs and conversation. Never quote the conversation.";
 
 /// Llama-specific system prompt. Avoids "..." placeholder which small models copy literally.
-const COMMIT_SYSTEM_PROMPT_LLAMA: &str = "You are a git commit message assistant. Output ONLY valid JSON. Subject: conventional commit (type(scope): description), max 72 chars. Body: 1-3 sentences describing the code changes. Base on the actual diffs and conversation. Never quote the conversation.";
+const COMMIT_SYSTEM_PROMPT_LLAMA: &str = "You are a git commit message assistant. Output ONLY valid JSON. Subject: short, clear summary, max 72 chars. No type(scope): in subject. Body: first line conventional (type(scope): description), then 1-3 sentences on the code changes. Base on the actual diffs and conversation. Never quote the conversation.";
 
 /// True if body is a known placeholder that small models copy from prompts.
 fn is_placeholder_body(body: &str) -> bool {
@@ -94,7 +94,7 @@ fn build_commit_prompt(
             out.push_str("\n---\n");
         }
     }
-    out.push_str("\nCode changes (diffs):\n---\n");
+    out.push_str("\nCode changes (diffs) for this commit only. Write a distinct message (do not repeat the same wording as other commits):\n---\n");
     let mut total_bytes = 0;
     for change in changes {
         if total_bytes >= max_diff_bytes {
@@ -115,7 +115,7 @@ fn build_commit_prompt(
         }
         out.push_str("\n---\n");
     }
-    out.push_str("\nOutput ONLY a JSON object: {\"subject\": \"...\", \"body\": \"...\"}");
+    out.push_str("\nOutput ONLY a JSON object: {\"subject\": \"...\", \"body\": \"...\"}. Subject = plain summary (no type(scope):). Body = first line type(scope): description, then details.");
     out
 }
 
@@ -123,8 +123,9 @@ fn build_commit_prompt(
 fn build_llama_subject_prompt(turns: &[(String, String)], changes: &[Change]) -> String {
     let mut out = String::new();
     out.push_str(
-        "IMPORTANT: Respond with ONLY a JSON object: {\"subject\": \"fix: add validation\"}. Use a real conventional commit for the actual changes. No other text.\n\n",
+        "IMPORTANT: Respond with ONLY a JSON object with key \"subject\". Subject must be a short, clear summary. Do NOT use type(scope): prefix. No other text.\n",
     );
+    out.push_str("Write a SPECIFIC subject for the actual code changes in the diffs below (e.g. Add JSON extraction for commit subject). Do not use a generic phrase like 'add validation'.\n\n");
     out.push_str("Conversation:\n---\n");
     for (prompt, response) in turns {
         let p = prompt.trim();
@@ -161,7 +162,7 @@ fn build_llama_subject_prompt(turns: &[(String, String)], changes: &[Change]) ->
         }
         out.push_str("\n---\n");
     }
-    out.push_str("\nOutput ONLY a JSON object with key \"subject\". Example: {\"subject\": \"fix: add validation\"}. Use conventional commit format (type(scope): description), max 72 chars.");
+    out.push_str("\nOutput ONLY a JSON object with key \"subject\". Plain summary only, max 72 chars. No type(scope):. Be specific to the diffs above.");
     out
 }
 
@@ -173,6 +174,7 @@ fn build_llama_body_prompt(
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("Subject: {}\n\n", subject));
+    out.push_str("Body must start with a conventional commit line: type(scope): description (e.g. fix(llm): add JSON extraction). Then 1-3 sentences describing the code changes. Keep this commit distinct from others.\n\n");
     out.push_str("Conversation:\n---\n");
     for (prompt, response) in turns {
         let p = prompt.trim();
@@ -440,9 +442,7 @@ fn select_provider() -> Option<Provider> {
     if env::var("ANTHROPIC_API_KEY").is_ok() {
         return Some(Provider::Anthropic);
     }
-    #[cfg(feature = "llama-embedded")]
-    return Some(Provider::Llama);
-    #[cfg(not(feature = "llama-embedded"))]
+    // Prefer Ollama when running (same model is much faster than embedded path, which loads model and does 2 completions per draft).
     return Some(Provider::Ollama);
 }
 
@@ -751,7 +751,7 @@ pub async fn infer_grouping_async(changes: &[Change]) -> Result<Vec<(String, Vec
     }
 }
 
-const GROUPING_SYSTEM_PROMPT: &str = "You are a git commit assistant. Given a list of code changes (each with an index 0, 1, 2...), group them into logical commits. Output ONLY a JSON array. Each element: {\"subject\": \"type: short description\", \"indices\": [0, 2, 5]}. Use conventional commit types (fix, feat, chore, refactor, etc). Each index must appear exactly once. Subject max 72 chars.";
+const GROUPING_SYSTEM_PROMPT: &str = "You are a git commit assistant. Given a list of code changes (each with an index 0, 1, 2...), group them into logical commits. Output ONLY a JSON array. Each element: {\"subject\": \"short plain description\", \"indices\": [0, 2, 5]}. Subject = clear summary only, no type(scope): prefix. Each index must appear exactly once. Subject max 72 chars.";
 
 fn build_grouping_prompt(changes: &[Change], max_bytes: usize) -> String {
     let mut out = String::new();
@@ -774,7 +774,7 @@ fn build_grouping_prompt(changes: &[Change], max_bytes: usize) -> String {
         }
         out.push_str("\n---\n");
     }
-    out.push_str("\nOutput ONLY a JSON array. Example: [{\"subject\":\"fix: add validation\",\"indices\":[0,2]},{\"subject\":\"feat: add endpoint\",\"indices\":[1]}]");
+    out.push_str("\nOutput ONLY a JSON array. Each subject = plain short description (no type(scope):). Example: [{\"subject\":\"Handle empty input in parser\",\"indices\":[0,2]},{\"subject\":\"Add auth middleware to API\",\"indices\":[1]}]");
     out
 }
 

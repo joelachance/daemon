@@ -40,7 +40,7 @@ impl BedrockClient {
         turns: &[(String, String)],
         changes: &[Change],
     ) -> Result<CommitMessage, String> {
-        let system_prompt = "You are a git commit message assistant. Output only a JSON object with keys: subject, body. subject must be conventional commit format (type(scope): description), max 72 chars. Infer a summarization of the code changes based on the session conversation. The subject must describe the code changes. Never quote or paraphrase the conversation (e.g. no 'Ok, here's...', 'we need to follow', 'let me...'). The body must describe the intent and what changed in the code. Use the full conversation context, not just the first line. Wrap body lines at 72 chars. Do not include explanations outside JSON.";
+        let system_prompt = "You are a git commit message assistant. Output only a JSON object with keys: subject, body. subject = short, clear summary of what changed, max 72 chars. Do NOT use type(scope): prefix in subject. body: first line must be conventional commit (type(scope): description), then describe the intent and what changed. Infer from the session conversation. Never quote or paraphrase the conversation (e.g. no 'Ok, here's...', 'we need to follow', 'let me...'). Use the full conversation context. Wrap body lines at 72 chars. Do not include explanations outside JSON.";
         let user_prompt = build_commit_prompt(turns, changes);
 
         let message = Message::builder()
@@ -121,7 +121,7 @@ fn build_commit_prompt(turns: &[(String, String)], changes: &[Change]) -> String
         }
         out.push_str("\n---\n");
     }
-    out.push_str("\nGenerate a git commit subject and body. Subject must be conventional commit format (type(scope): description). Body describes intent and changes.");
+    out.push_str("\nGenerate a git commit subject and body. Subject = plain summary (no type(scope):). Body = first line type(scope): description, then intent and changes.");
     out
 }
 

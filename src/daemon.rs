@@ -2,6 +2,7 @@ use crate::claude;
 use crate::cursor;
 use crate::daemon_log;
 use crate::git;
+use crate::llama;
 use crate::llm;
 use crate::path;
 use crate::grouping;
@@ -66,6 +67,7 @@ pub fn run_daemon(_start_stdin: bool) -> Result<(), String> {
     start_cursor_poll_thread();
     start_claude_poll_thread();
     start_opencode_poll_thread();
+    llama::preload_model_background();
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => match handle_stream(stream) {
@@ -207,17 +209,46 @@ pub fn send_refresh_drafts(session_id: &str) -> Result<(), String> {
         cwd: None,
         git_stdout: None,
     };
+    send_request(&request)
+}
+
+pub fn send_hard_refresh_drafts(session_id: &str) -> Result<(), String> {
+    ensure_daemon_running()?;
+    let request = Request {
+        kind: "hard_refresh_drafts".to_string(),
+        session_id: Some(session_id.to_string()),
+        summary: None,
+        paths: None,
+        tokens: None,
+        tool_tokens: None,
+        meta: None,
+        cwd: None,
+        git_stdout: None,
+    };
+    send_request(&request)
+}
+
+const REFRESH_READ_TIMEOUT_SECS: u64 = 120;
+
+fn send_request(request: &Request) -> Result<(), String> {
     let socket = socket_path();
     let mut stream = UnixStream::connect(&socket).map_err(|err| format!("connect: {err}"))?;
-    let payload = serde_json::to_vec(&request).map_err(|err| err.to_string())?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(REFRESH_READ_TIMEOUT_SECS)))
+        .map_err(|err| err.to_string())?;
+    let payload = serde_json::to_vec(request).map_err(|err| err.to_string())?;
     stream.write_all(&payload).map_err(|err| err.to_string())?;
     stream
         .shutdown(std::net::Shutdown::Write)
         .map_err(|err| err.to_string())?;
     let mut response_buf = String::new();
-    stream
-        .read_to_string(&mut response_buf)
-        .map_err(|err| err.to_string())?;
+    stream.read_to_string(&mut response_buf).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::TimedOut {
+            "Refresh timed out (2 min). Try again or use rr for hard refresh.".to_string()
+        } else {
+            err.to_string()
+        }
+    })?;
     let response: Response = serde_json::from_str(&response_buf).map_err(|err| err.to_string())?;
     if response.ok {
         Ok(())
@@ -239,6 +270,7 @@ fn handle_stream(mut stream: UnixStream) -> Result<bool, String> {
     let response = match request.kind.as_str() {
         "event" => handle_event(&request),
         "refresh_drafts" => handle_refresh_drafts(&request),
+        "hard_refresh_drafts" => handle_hard_refresh_drafts(&request),
         "ping" | "end_all" => Ok(EventResult {
             message: "ok".to_string(),
             summary: None,
@@ -375,8 +407,63 @@ pub fn upsert_session_presence(
 
 fn handle_refresh_drafts(request: &Request) -> Result<EventResult, String> {
     let session_id = request.session_id.as_ref().ok_or("missing session_id")?;
+    // #region agent log
+    crate::debug_instrument::log(
+        "daemon.rs:handle_refresh_drafts",
+        "start",
+        &format!("{{\"session_id\":\"{}\"}}", session_id),
+        "H1_H3",
+    );
+    // #endregion
     daemon_log::log(&format!("daemon: refresh_drafts session_id={}", session_id));
     refresh_session_drafts(session_id)?;
+    // #region agent log
+    crate::debug_instrument::log(
+        "daemon.rs:handle_refresh_drafts",
+        "end ok",
+        "{}",
+        "H1_H3",
+    );
+    // #endregion
+    Ok(EventResult {
+        message: "ok".to_string(),
+        summary: None,
+        staged_paths: Vec::new(),
+    })
+}
+
+fn handle_hard_refresh_drafts(request: &Request) -> Result<EventResult, String> {
+    let session_id = request.session_id.as_ref().ok_or("missing session_id")?;
+    // #region agent log
+    crate::debug_instrument::log(
+        "daemon.rs:handle_hard_refresh_drafts",
+        "start",
+        &format!("{{\"session_id\":\"{}\"}}", session_id),
+        "H1_H3",
+    );
+    // #endregion
+    daemon_log::log(&format!("daemon: hard_refresh_drafts session_id={}", session_id));
+    store::delete_drafts_for_session(session_id)?;
+    let changes = store::list_unassigned_changes(session_id)?;
+    // #region agent log
+    crate::debug_instrument::log(
+        "daemon.rs:handle_hard_refresh_drafts",
+        "after list_unassigned",
+        &format!("{{\"changes_len\":{}}}", changes.len()),
+        "H1_H3",
+    );
+    // #endregion
+    if !changes.is_empty() {
+        regroup_and_assign_drafts(session_id, &changes)?;
+    }
+    // #region agent log
+    crate::debug_instrument::log(
+        "daemon.rs:handle_hard_refresh_drafts",
+        "end ok",
+        "{}",
+        "H1_H3",
+    );
+    // #endregion
     Ok(EventResult {
         message: "ok".to_string(),
         summary: None,
@@ -753,8 +840,78 @@ fn capture_changes_for_turn(
         .collect();
     let blocks = parse_blocks(&snapshot);
     let mut out = Vec::new();
+    let mut updated_ids = HashSet::new();
+    let captured_at = OffsetDateTime::now_utc().unix_timestamp();
     for block in blocks {
         if prev_blocks.contains(&block.raw) {
+            continue;
+        }
+        if let Ok(Some(existing_id)) = store::find_unassigned_change_by_session_file_old_start(
+            session_id,
+            &block.file_path,
+            block.old_start,
+        ) {
+            store::update_change_content(
+                &existing_id,
+                &block.raw,
+                block.new_start,
+                block.new_count,
+                captured_at,
+                turn_id,
+            )?;
+            if updated_ids.insert(existing_id.clone()) {
+                let change = Change {
+                    id: existing_id,
+                    session_id: session_id.to_string(),
+                    prompt_id: turn_id.to_string(),
+                    file_path: block.file_path.clone(),
+                    base_commit_sha: base_commit_sha.to_string(),
+                    diff: block.raw,
+                    line_range: ChangeLineRange {
+                        old_start: block.old_start,
+                        old_count: block.old_count,
+                        new_start: block.new_start,
+                        new_count: block.new_count,
+                    },
+                    captured_at,
+                    change_type: block.change_type,
+                };
+                out.push(change);
+            }
+            continue;
+        }
+        if let Ok(Some(existing_id)) = store::find_unassigned_change_by_session_file_normalized_diff(
+            session_id,
+            &block.file_path,
+            &block.raw,
+        ) {
+            store::update_change_content(
+                &existing_id,
+                &block.raw,
+                block.new_start,
+                block.new_count,
+                captured_at,
+                turn_id,
+            )?;
+            if updated_ids.insert(existing_id.clone()) {
+                let change = Change {
+                    id: existing_id,
+                    session_id: session_id.to_string(),
+                    prompt_id: turn_id.to_string(),
+                    file_path: block.file_path.clone(),
+                    base_commit_sha: base_commit_sha.to_string(),
+                    diff: block.raw,
+                    line_range: ChangeLineRange {
+                        old_start: block.old_start,
+                        old_count: block.old_count,
+                        new_start: block.new_start,
+                        new_count: block.new_count,
+                    },
+                    captured_at,
+                    change_type: block.change_type,
+                };
+                out.push(change);
+            }
             continue;
         }
         let id = stable_id(&format!(
@@ -762,7 +919,7 @@ fn capture_changes_for_turn(
             block.file_path, block.raw, base_commit_sha
         ));
         let change = Change {
-            id,
+            id: id.clone(),
             session_id: session_id.to_string(),
             prompt_id: turn_id.to_string(),
             file_path: block.file_path.clone(),
@@ -774,7 +931,7 @@ fn capture_changes_for_turn(
                 new_start: block.new_start,
                 new_count: block.new_count,
             },
-            captured_at: OffsetDateTime::now_utc().unix_timestamp(),
+            captured_at,
             change_type: block.change_type,
         };
         store::insert_change(&change)?;
@@ -784,12 +941,8 @@ fn capture_changes_for_turn(
     Ok(out)
 }
 
-fn assign_changes_to_draft(
-    session_id: &str,
-    _prompt: &str,
-    changes: &[Change],
-) -> Result<(), String> {
-    let lockfiles = [
+fn regroup_and_assign_drafts(session_id: &str, changes: &[Change]) -> Result<(), String> {
+    const LOCKFILES: &[&str] = &[
         "package-lock.json",
         "yarn.lock",
         "pnpm-lock.yaml",
@@ -799,35 +952,43 @@ fn assign_changes_to_draft(
         "go.sum",
         "composer.lock",
     ];
-    let mut normal = Vec::new();
-    let mut lock = Vec::new();
-    for change in changes {
-        if lockfiles
-            .iter()
-            .any(|name| change.file_path.ends_with(name))
-        {
-            lock.push(change.clone());
-        } else {
-            normal.push(change.clone());
-        }
-    }
-    let normal_unassigned: Vec<_> = normal
+    let unassigned: Vec<_> = changes
         .iter()
         .filter(|c| !store::change_already_assigned(&c.id).unwrap_or(false))
         .cloned()
         .collect();
-    if !normal_unassigned.is_empty() {
-        let groups = llm::block_on_async(llm::infer_grouping_async(&normal_unassigned));
+    let mut normal = Vec::new();
+    let mut lock = Vec::new();
+    for change in unassigned {
+        if LOCKFILES.iter().any(|name| change.file_path.ends_with(name)) {
+            lock.push(change);
+        } else {
+            normal.push(change);
+        }
+    }
+    if !normal.is_empty() {
+        let groups = llm::block_on_async(llm::infer_grouping_async(&normal));
         match groups {
             Ok(groups) if !groups.is_empty() => {
                 for (subject, indices) in groups {
                     let changes_in_group: Vec<_> = indices
                         .into_iter()
-                        .filter_map(|i| normal_unassigned.get(i).cloned())
+                        .filter_map(|i| normal.get(i).cloned())
                         .collect();
                     if changes_in_group.is_empty() {
                         continue;
                     }
+                    let subject = if grouping::is_valid_commit_subject(&subject) {
+                        subject
+                    } else {
+                        let files: String = changes_in_group
+                            .iter()
+                            .map(|c| c.file_path.as_str())
+                            .take(3)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("fix: update {}", files)
+                    };
                     let draft_id = ensure_draft(session_id, &subject, false)?;
                     for change in changes_in_group {
                         store::add_change_to_draft(&draft_id, &change.id)?;
@@ -836,7 +997,7 @@ fn assign_changes_to_draft(
                 }
             }
             _ => {
-                let files: String = normal_unassigned
+                let files: String = normal
                     .iter()
                     .map(|c| c.file_path.as_str())
                     .take(3)
@@ -844,27 +1005,30 @@ fn assign_changes_to_draft(
                     .join(", ");
                 let subject = format!("fix: (generating...): {files}");
                 let draft_id = ensure_draft(session_id, &subject, false)?;
-                for change in normal_unassigned {
+                for change in normal {
                     store::add_change_to_draft(&draft_id, &change.id)?;
                 }
                 llm::block_on_async(refresh_draft_message_async(&draft_id))?;
             }
         }
     }
-    let lock_unassigned: Vec<_> = lock
-        .iter()
-        .filter(|c| !store::change_already_assigned(&c.id).unwrap_or(false))
-        .cloned()
-        .collect();
-    if !lock_unassigned.is_empty() {
+    if !lock.is_empty() {
         let subject = "chore: update lockfiles".to_string();
         let draft_id = ensure_draft(session_id, &subject, true)?;
-        for change in lock_unassigned {
+        for change in lock {
             store::add_change_to_draft(&draft_id, &change.id)?;
         }
         llm::block_on_async(refresh_draft_message_async(&draft_id))?;
     }
     Ok(())
+}
+
+fn assign_changes_to_draft(
+    session_id: &str,
+    _prompt: &str,
+    changes: &[Change],
+) -> Result<(), String> {
+    regroup_and_assign_drafts(session_id, changes)
 }
 
 const RETRY_DELAYS_SECS: &[u64] = &[20, 40, 60, 80, 100];

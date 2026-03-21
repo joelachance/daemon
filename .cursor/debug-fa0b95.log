@@ -1,0 +1,43 @@
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"78e63399-09e1-4ab2-a60c-32f0f7d5d9a3"},"timestamp":1773256884786,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"start","data":{"session_id":"78e63399-09e1-4ab2-a60c-32f0f7d5d9a3"},"timestamp":1773256894567,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"end ok","data":{},"timestamp":1773256911672,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"dashboard.rs:try_recv","message":"refresh_rx received","data":{"ok":true},"timestamp":1773256911773,"hypothesisId":"H2_H5"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773256917546,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773257110748,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"start","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773257129977,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"end ok","data":{},"timestamp":1773257147195,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"dashboard.rs:try_recv","message":"refresh_rx received","data":{"ok":true},"timestamp":1773257147334,"hypothesisId":"H2_H5"}
+{"sessionId":"fa0b95","location":"dashboard.rs:r","message":"first r, pending_r=true","data":{},"timestamp":1773257176388,"hypothesisId":"H4"}
+{"sessionId":"fa0b95","location":"dashboard.rs:rr","message":"hard refresh spawned","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773257176560,"hypothesisId":"H4"}
+{"sessionId":"fa0b95","location":"dashboard.rs:try_recv","message":"refresh_rx received","data":{"ok":false},"timestamp":1773257296677,"hypothesisId":"H2_H5"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773258557555,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"dashboard.rs:try_recv","message":"refresh_rx received","data":{"ok":false},"timestamp":1773258677709,"hypothesisId":"H2_H5"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"78e63399-09e1-4ab2-a60c-32f0f7d5d9a3"},"timestamp":1773258896434,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259646676,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"start","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259646677,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"dashboard.rs:r","message":"first r, pending_r=true","data":{},"timestamp":1773259674569,"hypothesisId":"H4"}
+{"sessionId":"fa0b95","location":"dashboard.rs:rr","message":"hard refresh spawned","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259675766,"hypothesisId":"H4"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259682278,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259684291,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259689485,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"end ok","data":{},"timestamp":1773259722769,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_hard_refresh_drafts","message":"start","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259722769,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_hard_refresh_drafts","message":"after list_unassigned","data":{"changes_len":8},"timestamp":1773259722772,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_hard_refresh_drafts","message":"end ok","data":{},"timestamp":1773259744738,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"start","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259744738,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259758129,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"end ok","data":{},"timestamp":1773259762317,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"start","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259762317,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"end ok","data":{},"timestamp":1773259780001,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"start","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259780001,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"end ok","data":{},"timestamp":1773259797735,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"start","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259797735,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259799977,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"end ok","data":{},"timestamp":1773259815481,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"start","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259815481,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"end ok","data":{},"timestamp":1773259833255,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"dashboard.rs:try_recv","message":"refresh_rx received","data":{"ok":true},"timestamp":1773259833382,"hypothesisId":"H2_H5"}
+{"sessionId":"fa0b95","location":"dashboard.rs:enter_sessions","message":"soft refresh spawned (enter Commits)","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259944730,"hypothesisId":"H2"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"start","data":{"session_id":"fa0b95a0-c77d-4c2e-be8e-eca4e9d29175"},"timestamp":1773259944731,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"daemon.rs:handle_refresh_drafts","message":"end ok","data":{},"timestamp":1773259962166,"hypothesisId":"H1_H3"}
+{"sessionId":"fa0b95","location":"dashboard.rs:try_recv","message":"refresh_rx received","data":{"ok":true},"timestamp":1773259962336,"hypothesisId":"H2_H5"}

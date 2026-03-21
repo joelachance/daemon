@@ -22,6 +22,12 @@ where
     f(guard.as_ref().unwrap())
 }
 
+/// Normalize diff for dedup: same file + same body (ignoring hunk line numbers) => one change.
+fn normalize_diff_for_dedup(diff: &str) -> String {
+    let re = regex::Regex::new(r#"@@\s*-\d+,\d+\s*\+\d+,\d+\s*@@"#).unwrap();
+    re.replace_all(diff, "@@").to_string()
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub id: String,
@@ -105,6 +111,7 @@ pub fn init() -> Result<(), String> {
     .map_err(|err| err.to_string())?;
         ensure_sessions_columns(conn)?;
         migrate_normalize_repo_paths(conn)?;
+        migrate_draft_changes_unique_change_id(conn)?;
         Ok(())
     })
 }
@@ -297,6 +304,77 @@ pub fn set_last_snapshot(session_id: &str, snapshot: &str) -> Result<(), String>
     })
 }
 
+/// Find an unassigned change in this session for the same file and hunk location (old_start).
+pub fn find_unassigned_change_by_session_file_old_start(
+    session_id: &str,
+    file_path: &str,
+    old_start: i64,
+) -> Result<Option<String>, String> {
+    with_conn(|conn| {
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT c.id FROM changes c
+                 WHERE c.session_id = ?1 AND c.file_path = ?2 AND c.old_start = ?3
+                   AND NOT EXISTS (SELECT 1 FROM draft_changes dc WHERE dc.change_id = c.id)
+                 LIMIT 1",
+                params![session_id, file_path, old_start],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(id)
+    })
+}
+
+/// Find an unassigned change in this session for the same file and same diff content (ignoring line numbers).
+/// Used to update instead of inserting when the same edit is captured again with shifted line numbers.
+pub fn find_unassigned_change_by_session_file_normalized_diff(
+    session_id: &str,
+    file_path: &str,
+    diff: &str,
+) -> Result<Option<String>, String> {
+    let key = normalize_diff_for_dedup(diff);
+    with_conn(|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.diff FROM changes c
+                 WHERE c.session_id = ?1 AND c.file_path = ?2
+                   AND NOT EXISTS (SELECT 1 FROM draft_changes dc WHERE dc.change_id = c.id)
+                 ORDER BY c.captured_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![session_id, file_path], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id, existing_diff): (String, String) = row.map_err(|e| e.to_string())?;
+            if normalize_diff_for_dedup(&existing_diff) == key {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    })
+}
+
+/// Update an existing change's content (e.g. after deduplicating a re-capture of the same hunk).
+pub fn update_change_content(
+    change_id: &str,
+    diff: &str,
+    new_start: i64,
+    new_count: i64,
+    captured_at: i64,
+    prompt_id: &str,
+) -> Result<(), String> {
+    with_conn(|conn| {
+        conn.execute(
+            "UPDATE changes SET diff = ?1, new_start = ?2, new_count = ?3, captured_at = ?4, prompt_id = ?5 WHERE id = ?6",
+            params![diff, new_start, new_count, captured_at, prompt_id, change_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+}
+
 pub fn insert_change(change: &Change) -> Result<(), String> {
     with_conn(|conn| {
         conn.execute(
@@ -363,14 +441,31 @@ pub fn change_already_assigned(change_id: &str) -> Result<bool, String> {
     })
 }
 
+/// Returns true if each change appears in at most one draft (uniqueness invariant).
+pub fn draft_changes_invariant_ok() -> Result<bool, String> {
+    with_conn(|conn| {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM (SELECT 1 FROM draft_changes GROUP BY change_id HAVING COUNT(*) > 1 LIMIT 1) AS dup",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count == 0)
+    })
+}
+
 pub fn add_change_to_draft(draft_id: &str, change_id: &str) -> Result<(), String> {
     with_conn(|conn| {
+        // Enforce one change → one draft: remove from any other draft first (move semantics).
+        conn.execute("DELETE FROM draft_changes WHERE change_id = ?1", params![change_id])
+            .map_err(|e| e.to_string())?;
         let order = next_draft_change_order_with_conn(conn, draft_id)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO draft_changes (draft_id, change_id, item_order) VALUES (?1, ?2, ?3)",
-        params![draft_id, change_id, order],
-    )
-    .map_err(|err| err.to_string())?;
+        conn.execute(
+            "INSERT INTO draft_changes (draft_id, change_id, item_order) VALUES (?1, ?2, ?3)",
+            params![draft_id, change_id, order],
+        )
+        .map_err(|err| err.to_string())?;
         Ok(())
     })
 }
@@ -544,11 +639,24 @@ pub fn list_unassigned_changes(session_id: &str) -> Result<Vec<Change>, String> 
             })
         })
         .map_err(|err| err.to_string())?;
-    let mut out = Vec::new();
+    let mut all: Vec<Change> = Vec::new();
     for row in rows {
-        out.push(row.map_err(|err| err.to_string())?);
+        all.push(row.map_err(|err| err.to_string())?);
     }
-        Ok(out)
+    let mut by_file_content: std::collections::HashMap<(String, String), Change> = std::collections::HashMap::new();
+    for change in all {
+        let key = (change.file_path.clone(), normalize_diff_for_dedup(&change.diff));
+        let keep = by_file_content
+            .get(&key)
+            .map(|c| change.captured_at > c.captured_at)
+            .unwrap_or(true);
+        if keep {
+            by_file_content.insert(key, change);
+        }
+    }
+    let mut out: Vec<Change> = by_file_content.into_values().collect();
+    out.sort_by_key(|c| c.captured_at);
+    Ok(out)
     })
 }
 
@@ -761,6 +869,22 @@ fn migrate_normalize_repo_paths(conn: &Connection) -> Result<(), String> {
                 .map_err(|err| err.to_string())?;
         }
     }
+    Ok(())
+}
+
+/// Ensures each change appears in at most one draft: dedupe existing rows, then add unique index.
+fn migrate_draft_changes_unique_change_id(conn: &Connection) -> Result<(), String> {
+    // Remove duplicate change_id rows, keeping one per change_id (arbitrary which draft we keep).
+    conn.execute(
+        "DELETE FROM draft_changes WHERE rowid NOT IN (SELECT MIN(rowid) FROM draft_changes GROUP BY change_id)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_draft_changes_change_id ON draft_changes(change_id)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

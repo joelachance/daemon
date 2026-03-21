@@ -2,6 +2,7 @@
 //! Requires `llama-embedded` feature and GG_LLAMA_MODEL env var or model_path.
 
 use crate::daemon_log;
+use crate::model;
 use std::env;
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -83,7 +84,7 @@ fn run_completion_impl(
     use llama_cpp_2::model::AddBos;
     use llama_cpp_2::sampling::LlamaSampler;
 
-    daemon_log::log(&format!("daemon: llama run_completion start"));
+    daemon_log::log("daemon: llama run_completion start (phases: backend -> model -> context -> tokenize -> decode prompt -> generate)");
     let model_path = match model_path_override {
         Some(p) => p.to_string_lossy().to_string(),
         None => {
@@ -231,7 +232,7 @@ fn run_completion_impl(
     let mut sample_idx = last_batch_size as i32 - 1;
 
     daemon_log::log(&format!(
-        "daemon: llama generating (max_tokens={} timeout_ms={})...",
+        "daemon: llama phase: GENERATING (model running now, max_tokens={} timeout_ms={})...",
         max_tokens, timeout_ms
     ));
     let mut last_log_secs = 0u64;
@@ -282,15 +283,45 @@ fn run_completion_impl(
     Ok(out)
 }
 
+/// Preload the embedded model in a background thread so the first inference is fast (like Ollama keeping the model in memory).
+/// Call once at daemon startup when using the embedded Llama path.
+#[cfg(feature = "llama-embedded")]
+pub fn preload_model_background() {
+    std::thread::spawn(|| {
+        if let Ok(path) = model::default_model_path() {
+            let path_str = path.to_string_lossy().to_string();
+            if let Ok(backend) = llama_backend() {
+                daemon_log::log("daemon: llama preloading model in background (kept in memory like Ollama)");
+                drop(get_cached_model(backend, &path_str));
+            }
+        }
+    });
+}
+
+#[cfg(not(feature = "llama-embedded"))]
+pub fn preload_model_background() {}
+
 #[cfg(feature = "llama-embedded")]
 fn llama_backend() -> Result<&'static llama_cpp_2::llama_backend::LlamaBackend, String> {
     use llama_cpp_2::llama_backend::LlamaBackend;
 
     static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
     Ok(BACKEND.get_or_init(|| {
-        daemon_log::log(&format!("daemon: llama initializing backend (first call)..."));
+        daemon_log::log("daemon: llama phase: initializing backend (first call only)...");
         let init_start = std::time::Instant::now();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_t = stop.clone();
+        let init_thread = std::thread::spawn(move || {
+            let mut s = 0u64;
+            while !stop_t.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                s += 1;
+                daemon_log::log(&format!("daemon: llama still initializing backend... {}s", s));
+            }
+        });
         let mut backend = LlamaBackend::init().expect("failed to initialize llama backend");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = init_thread.join();
         backend.void_logs();
         daemon_log::log(&format!(
             "daemon: llama backend ready in {:.1}s",

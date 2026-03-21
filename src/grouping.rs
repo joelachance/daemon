@@ -64,10 +64,23 @@ const CONVERSATION_PHRASES: &[&str] = &[
     "i will ",
 ];
 
+/// Placeholder subjects from prompts that the model may copy literally; reject these.
+const PLACEHOLDER_SUBJECTS: &[&str] = &[
+    "fix: add validation",
+    "feat: add endpoint",
+    "fix: (generating...)",
+];
+
 /// Returns false if the subject looks like a conversation quote rather than a code-change description.
 pub fn is_valid_commit_subject(subject: &str) -> bool {
     if subject.contains('\n') {
         return false;
+    }
+    let trimmed = subject.trim();
+    for placeholder in PLACEHOLDER_SUBJECTS {
+        if trimmed.eq_ignore_ascii_case(placeholder) {
+            return false;
+        }
     }
     let lower = subject.to_lowercase();
     for phrase in CONVERSATION_PHRASES {

@@ -57,11 +57,17 @@ mod theme {
 enum View {
     Sessions { selected: usize },
     Commits { session_idx: usize, selected: usize },
-    Diff {
+        Diff {
         session_idx: usize,
         draft_idx: usize,
         file_idx: usize,
         scroll_offset: u16,
+        /// Cache so we don't refetch/rebuild every frame when scrolling.
+        cached_draft_id: Option<String>,
+        cached_changes: Option<Vec<crate::session::Change>>,
+        cached_file_idx: Option<usize>,
+        /// Current file's diff line strings (avoids store + diff.lines() every frame).
+        cached_diff_line_strings: Option<Vec<String>>,
     },
     EditBranch { session_idx: usize, buffer: String },
     EditCommit { session_idx: usize, draft_idx: usize, buffer: String },
@@ -119,12 +125,15 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
     let mut accept_pending = false;
     let mut status: Option<(bool, String)> = None;
     let mut refresh_rx: Option<mpsc::Receiver<Result<(), String>>> = None;
+    let mut refreshing_session_id: Option<String> = None;
     let mut model_download_rx: Option<mpsc::Receiver<(bool, String)>> = None;
     let mut spinner_frame: usize = 0;
     let mut log_scroll: u16 = 0;
     let mut slash_menu: Option<SlashMenuState> = None;
     let mut sessions: Vec<store::SessionInfo> = Vec::new();
     let mut last_refresh_mtime: Option<std::time::SystemTime> = None;
+    let mut pending_r = false;
+    let mut health_ok = true;
 
     loop {
         let should_refetch = last_refresh_mtime.is_none()
@@ -132,7 +141,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                 (Some(mtime), Some(last)) if mtime > last => true,
                 _ => false,
             };
-        if should_refetch {
+        if should_refetch && !matches!(&view, View::Diff { .. }) {
             let now = OffsetDateTime::now_utc().unix_timestamp();
             let window_secs = active_window_secs();
             sessions = match git::repo_root() {
@@ -145,6 +154,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                 Err(_) => store::list_active_sessions(now, window_secs)?,
             };
             last_refresh_mtime = store::refresh_signal_mtime();
+            health_ok = store::draft_changes_invariant_ok().unwrap_or(false);
         }
 
         if let Some(ref rx) = model_download_rx {
@@ -155,7 +165,16 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
         }
         if let Some(ref rx) = refresh_rx {
             if let Ok(result) = rx.try_recv() {
+                // #region agent log
+                crate::debug_instrument::log(
+                    "dashboard.rs:try_recv",
+                    "refresh_rx received",
+                    &format!("{{\"ok\":{}}}", result.is_ok()),
+                    "H2_H5",
+                );
+                // #endregion
                 refresh_rx = None;
+                refreshing_session_id = None;
                 if let Err(e) = result {
                     status = Some((false, format!("Refresh failed: {e}")));
                 }
@@ -167,14 +186,16 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
             .draw(|frame| {
                 render(
                     frame,
-                    &view,
+                    &mut view,
                     &sessions,
                     &accept_pending,
                     &status,
                     refreshing,
+                    &refreshing_session_id,
                     spinner_frame,
                     log_scroll,
                     &slash_menu,
+                    health_ok,
                 )
             })
             .map_err(|e| e.to_string())?;
@@ -198,6 +219,24 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
             Some(_) => continue,
             None => continue,
         };
+
+            if pending_r && key != KeyCode::Char('r') {
+            if let View::Commits { session_idx, .. } = &view {
+                if *session_idx < sessions.len() {
+                    refresh_rx = None;
+                    let session_id = sessions[*session_idx].id.clone();
+                    refreshing_session_id = Some(session_id.clone());
+                    let (tx, rx) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        let result = daemon::send_refresh_drafts(&session_id);
+                        let _ = tx.send(result);
+                    });
+                    refresh_rx = Some(rx);
+                }
+            }
+            pending_r = false;
+            continue;
+        }
 
         let edit_done = match &mut view {
             View::EditBranch { session_idx, buffer } => {
@@ -549,14 +588,30 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
             KeyCode::Char('r') => {
                 if let View::Commits { session_idx, .. } = &view {
                     if *session_idx < sessions.len() {
-                        refresh_rx = None; // Cancel any in-flight refresh
                         let session_id = sessions[*session_idx].id.clone();
-                        let (tx, rx) = mpsc::channel();
-                        std::thread::spawn(move || {
-                            let result = daemon::send_refresh_drafts(&session_id);
-                            let _ = tx.send(result);
-                        });
-                        refresh_rx = Some(rx);
+                        if pending_r {
+                            // rr = hard refresh
+                            pending_r = false;
+                            refresh_rx = None;
+                            refreshing_session_id = Some(session_id.clone());
+                            let (tx, rx) = mpsc::channel();
+                            std::thread::spawn(move || {
+                                let result = daemon::send_hard_refresh_drafts(&session_id);
+                                let _ = tx.send(result);
+                            });
+                            refresh_rx = Some(rx);
+                        } else {
+                            // r = soft refresh (immediate)
+                            pending_r = true;
+                            refresh_rx = None;
+                            refreshing_session_id = Some(session_id.clone());
+                            let (tx, rx) = mpsc::channel();
+                            std::thread::spawn(move || {
+                                let result = daemon::send_refresh_drafts(&session_id);
+                                let _ = tx.send(result);
+                            });
+                            refresh_rx = Some(rx);
+                        }
                     }
                 }
                 continue;
@@ -573,6 +628,10 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
             draft_idx,
             file_idx,
             scroll_offset,
+            cached_draft_id: _,
+            cached_changes: _,
+            cached_file_idx,
+            cached_diff_line_strings,
         } = &mut view
         {
             if back || enter {
@@ -607,28 +666,33 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                     continue;
                 }
                 KeyCode::Char('n') | KeyCode::Char(' ') => {
-                    let total_lines = if let Some(session) = sessions.get(*session_idx) {
-                        if let Ok(drafts) = store::list_drafts(&session.id) {
-                            if let Some(draft) = drafts.get(*draft_idx) {
-                                let change_ids =
-                                    store::draft_change_ids(&draft.id).unwrap_or_default();
-                                if let Some(change_id) = change_ids.get(*file_idx) {
-                                    store::get_change(change_id)
-                                        .ok()
-                                        .flatten()
-                                        .map(|c| c.diff.lines().count())
-                                        .unwrap_or(0)
+                    let total_lines = match (cached_file_idx, cached_diff_line_strings.as_ref()) {
+                        (Some(cfi), Some(l)) if *cfi == *file_idx => l.len(),
+                        _ => {
+                            if let Some(session) = sessions.get(*session_idx) {
+                                if let Ok(drafts) = store::list_drafts(&session.id) {
+                                    if let Some(draft) = drafts.get(*draft_idx) {
+                                        let change_ids =
+                                            store::draft_change_ids(&draft.id).unwrap_or_default();
+                                        if let Some(change_id) = change_ids.get(*file_idx) {
+                                            store::get_change(change_id)
+                                                .ok()
+                                                .flatten()
+                                                .map(|c| c.diff.lines().count())
+                                                .unwrap_or(0)
+                                        } else {
+                                            0
+                                        }
+                                    } else {
+                                        0
+                                    }
                                 } else {
                                     0
                                 }
                             } else {
                                 0
                             }
-                        } else {
-                            0
                         }
-                    } else {
-                        0
                     };
                     let header_len = if accept_pending { 3 } else { 2 };
                     let viewport_height = terminal
@@ -659,13 +723,6 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                 } else if up && len > 0 {
                     *selected = selected.saturating_sub(1);
                 } else if enter && len > 0 {
-                    let session_id = sessions[*selected].id.clone();
-                    let (tx, rx) = mpsc::channel();
-                    std::thread::spawn(move || {
-                        let result = daemon::send_refresh_drafts(&session_id);
-                        let _ = tx.send(result);
-                    });
-                    refresh_rx = Some(rx);
                     let drafts = store::list_drafts(&sessions[*selected].id)?;
                     let commit_selected = if drafts.is_empty() { 0 } else { 0 };
                     view = View::Commits {
@@ -695,6 +752,10 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
                             draft_idx: *selected,
                             file_idx: 0,
                             scroll_offset: 0,
+                            cached_draft_id: None,
+                            cached_changes: None,
+                            cached_file_idx: None,
+                            cached_diff_line_strings: None,
                         };
                     }
                 }
@@ -707,20 +768,32 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<(), String> {
 
 fn render(
     frame: &mut Frame,
-    view: &View,
+    view: &mut View,
     sessions: &[store::SessionInfo],
     accept_pending: &bool,
     status: &Option<(bool, String)>,
     refreshing: bool,
+    refreshing_session_id: &Option<String>,
     spinner_frame: usize,
     log_scroll: u16,
     slash_menu: &Option<SlashMenuState>,
+    health_ok: bool,
 ) {
     let width = frame.area().width as usize;
 
+    let title_line = || {
+        Line::from(vec![
+            if health_ok {
+                Span::styled("● ", theme::success())
+            } else {
+                Span::styled("○ ", theme::header_hint())
+            },
+            Span::styled("vibe dashboard", theme::header_title()),
+        ])
+    };
     let header_lines = if *accept_pending {
         vec![
-            Line::from(Span::styled("vibe dashboard", theme::header_title())),
+            title_line(),
             Line::from(Span::styled(
                 "j/k/n=move  l/enter=select  h/esc=back  q=quit",
                 theme::header_hint(),
@@ -733,7 +806,7 @@ fn render(
     } else if let Some((ok, msg)) = status {
         let style = if *ok { theme::success() } else { theme::error() };
         vec![
-            Line::from(Span::styled("vibe dashboard", theme::header_title())),
+            title_line(),
             Line::from(Span::styled(
                 "j/k/n=move  l/enter=select  h/esc=back  q=quit",
                 theme::header_hint(),
@@ -743,21 +816,22 @@ fn render(
     } else if refreshing {
         let spin = SPINNER[spinner_frame];
         vec![
-            Line::from(Span::styled("vibe dashboard", theme::header_title())),
+            title_line(),
             Line::from(vec![
                 Span::styled(
-                    format!(" {} Refreshing commit messages... (r=restart)", spin),
+                    format!(" {} Refreshing commit messages... (may take 1–2 min with local model)", spin),
                     theme::header_hint(),
                 ),
             ]),
         ]
     } else {
+        let hint = match view {
+            View::Commits { .. } => "j/k/n=move  l/enter=select  h/esc=back  a+Enter=accept  r=refresh  rr=hard refresh  /=menu  q=quit",
+            _ => "j/k/n=move  l/enter=select  h/esc=back  a+Enter=accept  /=menu  q=quit",
+        };
         vec![
-            Line::from(Span::styled("vibe dashboard", theme::header_title())),
-            Line::from(Span::styled(
-                "j/k/n=move  l/enter=select  h/esc=back  a+Enter=accept  r=refresh  /=menu  q=quit",
-                theme::header_hint(),
-            )),
+            title_line(),
+            Line::from(Span::styled(hint, theme::header_hint())),
         ]
     };
 
@@ -819,6 +893,10 @@ fn render(
             draft_idx,
             file_idx,
             scroll_offset,
+            cached_draft_id,
+            cached_changes,
+            cached_file_idx,
+            cached_diff_line_strings,
         } => {
             let diff_chunks = Layout::vertical([
                 Constraint::Min(3),
@@ -830,6 +908,32 @@ fn render(
             if let Some(session) = sessions.get(*session_idx) {
                 let drafts = store::list_drafts(&session.id).unwrap_or_default();
                 if let Some(draft) = drafts.get(*draft_idx) {
+                    if cached_draft_id.as_deref() != Some(draft.id.as_str()) {
+                        *cached_draft_id = Some(draft.id.clone());
+                        let change_ids =
+                            store::draft_change_ids(&draft.id).unwrap_or_default();
+                        *cached_changes = Some(
+                            change_ids
+                                .iter()
+                                .filter_map(|id| store::get_change(id).ok().flatten())
+                                .collect(),
+                        );
+                        *cached_file_idx = None;
+                        *cached_diff_line_strings = None;
+                    }
+                    let changes = cached_changes.as_ref().unwrap();
+                    let file_count = changes.len();
+                    let clamped_file_idx = (*file_idx).min(file_count.saturating_sub(1));
+
+                    if *cached_file_idx != Some(clamped_file_idx) {
+                        let line_strings: Vec<String> = changes
+                            .get(clamped_file_idx)
+                            .map(|change| change.diff.lines().map(|s| s.to_string()).collect())
+                            .unwrap_or_default();
+                        *cached_file_idx = Some(clamped_file_idx);
+                        *cached_diff_line_strings = Some(line_strings);
+                    }
+
                     let msg_area = Layout::horizontal([
                         Constraint::Percentage(65),
                         Constraint::Min(0),
@@ -838,13 +942,6 @@ fn render(
                     let msg_para =
                         Paragraph::new(draft.message.as_str()).wrap(Wrap { trim: false });
                     frame.render_widget(msg_para, msg_area[0]);
-                    let change_ids = store::draft_change_ids(&draft.id).unwrap_or_default();
-                    let changes: Vec<_> = change_ids
-                        .iter()
-                        .filter_map(|id| store::get_change(id).ok().flatten())
-                        .collect();
-                    let file_count = changes.len();
-                    let clamped_file_idx = (*file_idx).min(file_count.saturating_sub(1));
 
                     let main_split = Layout::horizontal([
                         Constraint::Length(30),
@@ -879,20 +976,20 @@ fn render(
                         ListState::default().with_selected(Some(clamped_file_idx));
                     frame.render_stateful_widget(file_list, main_split[0], &mut file_state);
 
-                    let mut lines: Vec<Line> = Vec::new();
-                    if let Some(change) = changes.get(clamped_file_idx) {
-                        for line in change.diff.lines() {
-                            let s = line.to_string();
+                    let line_strings = cached_diff_line_strings.as_deref().unwrap_or(&[]);
+                    let lines: Vec<Line> = line_strings
+                        .iter()
+                        .map(|s| {
                             let span = if s.starts_with('+') && !s.starts_with("+++") {
-                                Span::styled(s, Style::new().fg(Color::Green))
+                                Span::styled(s.as_str(), Style::new().fg(Color::Green))
                             } else if s.starts_with('-') && !s.starts_with("---") {
-                                Span::styled(s, Style::new().fg(Color::Red))
+                                Span::styled(s.as_str(), Style::new().fg(Color::Red))
                             } else {
-                                Span::raw(s)
+                                Span::raw(s.as_str())
                             };
-                            lines.push(Line::from(span));
-                        }
-                    }
+                            Line::from(span)
+                        })
+                        .collect();
                     let total_lines = lines.len();
                     let max_scroll = total_lines
                         .saturating_sub(viewport_height)
@@ -1033,8 +1130,31 @@ fn render(
                 .split(main_chunk);
                 frame.render_widget(header, header_area[0]);
 
-                let drafts = store::list_drafts(&session.id).unwrap_or_default();
-                if drafts.is_empty() {
+                let showing_loaders = refreshing_session_id.as_deref() == Some(session.id.as_str());
+                let drafts = if showing_loaders {
+                    Vec::new()
+                } else {
+                    store::list_drafts(&session.id).unwrap_or_default()
+                };
+
+                if showing_loaders {
+                    let spin = SPINNER[spinner_frame];
+                    let loader_count = 3;
+                    let items: Vec<ListItem> = (0..loader_count)
+                        .map(|i| {
+                            ListItem::new(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(
+                                    format!("  [{}] {} Generating commits...", i + 1, spin),
+                                    theme::commit_msg(i == 0),
+                                ),
+                            ]))
+                        })
+                        .collect();
+                    let list = List::new(items);
+                    let mut state = ListState::default().with_selected(Some(0));
+                    frame.render_stateful_widget(list, header_area[1], &mut state);
+                } else if drafts.is_empty() {
                     let empty = Paragraph::new(Span::styled(
                         "  (no commits)",
                         theme::header_hint(),
